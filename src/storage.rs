@@ -12,6 +12,7 @@ use crate::classifier::{self, SECRET_TTL_SECONDS};
 use crate::domain::{ClipEntry, ContentKind};
 
 const META_LAST_RESTORED_HASH_KEY: &str = "last_restored_hash";
+const ENTRY_SELECT_COLS: &str = "id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at, image_blob, image_width, image_height";
 
 /// Camada de persistência local embutida sobre SQLite (`rusqlite`) em modo WAL.
 pub struct Storage {
@@ -54,7 +55,10 @@ impl Storage {
                 content_hash TEXT NOT NULL UNIQUE,
                 use_count INTEGER NOT NULL DEFAULT 1,
                 pinned INTEGER NOT NULL DEFAULT 0,
-                expires_at INTEGER
+                expires_at INTEGER,
+                image_blob BLOB,
+                image_width INTEGER,
+                image_height INTEGER
             );
 
             CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_content_hash
@@ -74,6 +78,8 @@ impl Storage {
             ",
         )
         .context("falha ao inicializar PRAGMAs e schema SQLite")?;
+
+        ensure_image_columns(&conn)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -106,9 +112,7 @@ impl Storage {
 
         let existing = tx
             .query_row(
-                "SELECT id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at
-                 FROM entries
-                 WHERE content_hash = ?1",
+                &format!("SELECT {ENTRY_SELECT_COLS} FROM entries WHERE content_hash = ?1"),
                 params![target_hash],
                 row_to_entry,
             )
@@ -138,8 +142,9 @@ impl Storage {
             tx.execute(
                 "INSERT INTO entries (
                     content, pretty_json, kind, created_at, updated_at,
-                    content_hash, use_count, pinned, expires_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    content_hash, use_count, pinned, expires_at,
+                    image_blob, image_width, image_height
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL, NULL)",
                 params![
                     entry.content,
                     entry.pretty_json,
@@ -160,15 +165,81 @@ impl Storage {
         Ok(Some(saved_entry))
     }
 
+    /// Insere uma nova imagem PNG ou deduplica pelo hash SHA-256 dos bytes da imagem.
+    pub fn insert_or_update_image(
+        &self,
+        png_bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+        now_ts: i64,
+    ) -> Result<Option<ClipEntry>> {
+        if png_bytes.is_empty() || width == 0 || height == 0 {
+            return Ok(None);
+        }
+
+        let target_hash = ClipEntry::compute_bytes_hash(&png_bytes);
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        tx.execute(
+            "DELETE FROM entries WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+            params![now_ts],
+        )?;
+
+        let existing = tx
+            .query_row(
+                &format!("SELECT {ENTRY_SELECT_COLS} FROM entries WHERE content_hash = ?1"),
+                params![target_hash],
+                row_to_entry,
+            )
+            .optional()?;
+
+        let saved_entry = if let Some(mut entry) = existing {
+            entry.updated_at = now_ts;
+            entry.use_count = entry.use_count.saturating_add(1);
+            tx.execute(
+                "UPDATE entries SET updated_at = ?1, use_count = ?2 WHERE id = ?3",
+                params![entry.updated_at, entry.use_count as i64, entry.id as i64],
+            )?;
+            entry
+        } else {
+            let mut entry = ClipEntry::new_image(0, png_bytes, width, height, now_ts);
+            tx.execute(
+                "INSERT INTO entries (
+                    content, pretty_json, kind, created_at, updated_at,
+                    content_hash, use_count, pinned, expires_at,
+                    image_blob, image_width, image_height
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    entry.content,
+                    entry.pretty_json,
+                    kind_to_str(entry.kind),
+                    entry.created_at,
+                    entry.updated_at,
+                    entry.content_hash,
+                    entry.use_count as i64,
+                    i64::from(entry.pinned),
+                    entry.expires_at,
+                    entry.image_blob,
+                    i64::from(width),
+                    i64::from(height),
+                ],
+            )?;
+            entry.id = tx.last_insert_rowid() as u64;
+            entry
+        };
+
+        tx.commit()?;
+        Ok(Some(saved_entry))
+    }
+
     /// Busca uma entrada específica pelo ID.
     #[allow(dead_code)]
     pub fn get(&self, id: u64) -> Result<Option<ClipEntry>> {
         let conn = self.lock_conn()?;
         let entry = conn
             .query_row(
-                "SELECT id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at
-                 FROM entries
-                 WHERE id = ?1",
+                &format!("SELECT {ENTRY_SELECT_COLS} FROM entries WHERE id = ?1"),
                 params![id as i64],
                 row_to_entry,
             )
@@ -188,9 +259,7 @@ impl Storage {
 
         let current = tx
             .query_row(
-                "SELECT id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at
-                 FROM entries
-                 WHERE id = ?1",
+                &format!("SELECT {ENTRY_SELECT_COLS} FROM entries WHERE id = ?1"),
                 params![id as i64],
                 row_to_entry,
             )
@@ -226,9 +295,7 @@ impl Storage {
 
         let current = tx
             .query_row(
-                "SELECT id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at
-                 FROM entries
-                 WHERE id = ?1",
+                &format!("SELECT {ENTRY_SELECT_COLS} FROM entries WHERE id = ?1"),
                 params![id as i64],
                 row_to_entry,
             )
@@ -351,12 +418,12 @@ impl Storage {
             )?;
         }
 
-        let mut stmt = conn.prepare(
-            "SELECT id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {ENTRY_SELECT_COLS}
              FROM entries
              WHERE expires_at IS NULL OR expires_at > ?1
-             ORDER BY pinned DESC, updated_at DESC, id DESC",
-        )?;
+             ORDER BY pinned DESC, updated_at DESC, id DESC"
+        ))?;
 
         let rows = stmt.query_map(params![now_ts], row_to_entry)?;
         let mut active = Vec::new();
@@ -373,6 +440,25 @@ impl Storage {
     }
 }
 
+fn ensure_image_columns(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(entries);")?;
+    let existing_cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    if !existing_cols.iter().any(|c| c == "image_blob") {
+        conn.execute("ALTER TABLE entries ADD COLUMN image_blob BLOB;", [])?;
+    }
+    if !existing_cols.iter().any(|c| c == "image_width") {
+        conn.execute("ALTER TABLE entries ADD COLUMN image_width INTEGER;", [])?;
+    }
+    if !existing_cols.iter().any(|c| c == "image_height") {
+        conn.execute("ALTER TABLE entries ADD COLUMN image_height INTEGER;", [])?;
+    }
+
+    Ok(())
+}
+
 fn kind_to_str(kind: ContentKind) -> &'static str {
     match kind {
         ContentKind::PlainText => "PlainText",
@@ -381,6 +467,7 @@ fn kind_to_str(kind: ContentKind) -> &'static str {
         ContentKind::CodeSnippet => "CodeSnippet",
         ContentKind::ShellCommand => "ShellCommand",
         ContentKind::SecretToken => "SecretToken",
+        ContentKind::Image => "Image",
     }
 }
 
@@ -392,6 +479,7 @@ fn kind_from_str(raw: &str) -> std::result::Result<ContentKind, rusqlite::Error>
         "CodeSnippet" => Ok(ContentKind::CodeSnippet),
         "ShellCommand" => Ok(ContentKind::ShellCommand),
         "SecretToken" => Ok(ContentKind::SecretToken),
+        "Image" => Ok(ContentKind::Image),
         other => Err(rusqlite::Error::FromSqlConversionFailure(
             3,
             Type::Text,
@@ -403,6 +491,13 @@ fn kind_from_str(raw: &str) -> std::result::Result<ContentKind, rusqlite::Error>
 fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipEntry> {
     let kind_raw: String = row.get(3)?;
     let kind = kind_from_str(&kind_raw)?;
+    let image_blob: Option<Vec<u8>> = row.get(10)?;
+    let image_width: Option<i64> = row.get(11)?;
+    let image_height: Option<i64> = row.get(12)?;
+    let image_dimensions = match (image_width, image_height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w as u32, h as u32)),
+        _ => None,
+    };
 
     Ok(ClipEntry {
         id: row.get::<_, i64>(0)? as u64,
@@ -415,6 +510,8 @@ fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipEntry> {
         use_count: row.get::<_, i64>(7)? as u64,
         pinned: row.get::<_, i64>(8)? != 0,
         expires_at: row.get(9)?,
+        image_blob,
+        image_dimensions,
     })
 }
 
@@ -649,5 +746,96 @@ mod tests {
         assert_eq!(final_entries[0].id, seed.id);
         assert!(final_entries[0].pinned);
         assert_eq!(final_entries[0].use_count, 2);
+    }
+
+    #[test]
+    fn image_persistence_deduplication_and_restore_work() {
+        let (_dir, storage) = test_storage();
+        let png_bytes = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 4, 5, 6];
+        let expected_hash = ClipEntry::compute_bytes_hash(&png_bytes);
+
+        let first = storage
+            .insert_or_update_image(png_bytes.clone(), 1920, 1080, 1_000)
+            .expect("insert image")
+            .expect("entry");
+
+        assert_eq!(first.kind, ContentKind::Image);
+        assert_eq!(first.kind.tag(), "[IMG]");
+        assert_eq!(first.image_dimensions, Some((1920, 1080)));
+        assert_eq!(first.image_blob.as_deref(), Some(png_bytes.as_slice()));
+        assert_eq!(first.content_hash, expected_hash);
+        assert_eq!(first.content, "Imagem PNG (1920x1080, 1 KB)");
+        assert_eq!(first.use_count, 1);
+
+        // Mesmos bytes devem deduplicar sem criar segundo registro
+        let dup = storage
+            .insert_or_update_image(png_bytes.clone(), 1920, 1080, 1_200)
+            .expect("dup image")
+            .expect("entry");
+        assert_eq!(dup.id, first.id);
+        assert_eq!(dup.use_count, 2);
+        assert_eq!(dup.updated_at, 1_200);
+
+        let listed = storage.list_all(1_300).expect("list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].image_blob.as_deref(), Some(png_bytes.as_slice()));
+
+        let restored = storage
+            .record_restore(first.id, 1_400)
+            .expect("restore image")
+            .expect("entry");
+        assert_eq!(restored.use_count, 3);
+        assert_eq!(
+            storage.consume_last_restored_hash().expect("consume"),
+            Some(expected_hash)
+        );
+    }
+
+    #[test]
+    fn legacy_sqlite_schema_migrates_without_losing_data() {
+        let dir = tempdir().expect("temp dir");
+        let db_path = dir.path().join("legacy.db");
+
+        {
+            let conn = Connection::open(&db_path).expect("open legacy db");
+            conn.execute_batch(
+                "
+                CREATE TABLE entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content TEXT NOT NULL,
+                    pretty_json TEXT,
+                    kind TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    content_hash TEXT NOT NULL UNIQUE,
+                    use_count INTEGER NOT NULL DEFAULT 1,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    expires_at INTEGER
+                );
+                INSERT INTO entries (
+                    content, pretty_json, kind, created_at, updated_at,
+                    content_hash, use_count, pinned, expires_at
+                ) VALUES (
+                    'historico antigo preservado', NULL, 'PlainText',
+                    100, 100, 'legacyhash123', 1, 0, NULL
+                );
+                ",
+            )
+            .expect("seed legacy table");
+        }
+
+        let storage = Storage::open(&db_path).expect("migrate legacy db");
+        let existing = storage.list_all(200).expect("list migrated");
+        assert_eq!(existing.len(), 1);
+        assert_eq!(existing[0].content, "historico antigo preservado");
+        assert!(existing[0].image_blob.is_none());
+        assert!(existing[0].image_dimensions.is_none());
+
+        let img = storage
+            .insert_or_update_image(vec![1, 2, 3, 4], 64, 64, 250)
+            .expect("insert image after migration")
+            .expect("img entry");
+        assert_eq!(img.kind, ContentKind::Image);
+        assert_eq!(storage.list_all(260).expect("list all").len(), 2);
     }
 }

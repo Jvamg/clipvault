@@ -198,6 +198,8 @@ pub fn build_entry(id: u64, content: &str, now_ts: i64) -> ClipEntry {
         use_count: 1,
         pinned: false,
         expires_at,
+        image_blob: None,
+        image_dimensions: None,
     }
 }
 

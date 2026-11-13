@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Local, Utc};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -15,12 +15,37 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
+use ratatui_image::picker::{Picker, ProtocolType};
+use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::{FilterType, Resize, StatefulImage};
 
 use crate::domain::{ClipEntry, ContentKind};
 use crate::storage::Storage;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Determina se o terminal suporta protocolo Kitty quando a detecção automática cai em Halfblocks.
+pub fn should_use_kitty_protocol(
+    guessed: ProtocolType,
+    term_program: Option<&str>,
+    term: Option<&str>,
+    desktop: Option<&str>,
+) -> bool {
+    if guessed != ProtocolType::Halfblocks {
+        return false;
+    }
+    let matches_modern_term = |val: &str| {
+        let lower = val.to_ascii_lowercase();
+        lower.contains("cosmic")
+            || lower.contains("kitty")
+            || lower.contains("ghostty")
+            || lower.contains("wezterm")
+    };
+    term_program.is_some_and(matches_modern_term)
+        || term.is_some_and(matches_modern_term)
+        || desktop.is_some_and(|d| d.to_ascii_lowercase().contains("cosmic"))
+}
 
 /// Estado completo da interface interativa de terminal.
 pub struct App {
@@ -32,6 +57,8 @@ pub struct App {
     pub reveal_secret: bool,
     pub should_quit: bool,
     pub status_message: Option<String>,
+    pub picker: Picker,
+    pub image_preview_state: Option<(u64, Box<dyn StatefulProtocol>)>,
 }
 
 impl App {
@@ -45,9 +72,65 @@ impl App {
             reveal_secret: false,
             should_quit: false,
             status_message: None,
+            picker: Picker::new((8, 16)),
+            image_preview_state: None,
         };
         app.refresh_entries(None)?;
         Ok(app)
+    }
+
+    /// Detecta o protocolo gráfico do terminal (Kitty/Sixel/Halfblocks) após entrar na tela alternativa.
+    pub fn init_terminal_picker(&mut self) {
+        let mut picker = Picker::from_termios().unwrap_or_else(|_| Picker::new((9, 18)));
+        let guessed = picker.guess_protocol();
+        let term_program = std::env::var("TERM_PROGRAM").ok();
+        let term = std::env::var("TERM").ok();
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
+            .ok()
+            .or_else(|| std::env::var("COSMIC_VERSION").ok().map(|_| "cosmic".to_string()));
+
+        if should_use_kitty_protocol(
+            guessed,
+            term_program.as_deref(),
+            term.as_deref(),
+            desktop.as_deref(),
+        ) {
+            picker.protocol_type = ProtocolType::Kitty;
+        }
+
+        self.picker = picker;
+    }
+
+    /// Garante que o protocolo de renderização da imagem selecionada esteja pronto para o painel.
+    pub fn ensure_image_protocol(&mut self) {
+        let Some(entry) = self.selected_entry() else {
+            self.image_preview_state = None;
+            return;
+        };
+
+        if entry.kind != ContentKind::Image {
+            self.image_preview_state = None;
+            return;
+        }
+
+        let entry_id = entry.id;
+        if self
+            .image_preview_state
+            .as_ref()
+            .is_some_and(|(cached_id, _)| *cached_id == entry_id)
+        {
+            return;
+        }
+
+        if let Some(blob) = entry.image_blob.as_deref() {
+            if let Ok(dyn_img) = image::load_from_memory(blob) {
+                let proto = self.picker.new_resize_protocol(dyn_img);
+                self.image_preview_state = Some((entry_id, proto));
+                return;
+            }
+        }
+
+        self.image_preview_state = None;
     }
 
     pub fn selected_entry(&self) -> Option<&ClipEntry> {
@@ -175,8 +258,17 @@ impl App {
         // Registra o hash antes de copiar para que o daemon em execução ignore o eco.
         let _ = self.storage.record_restore(entry.id, now_ts)?;
 
-        crate::watcher::set_clipboard_text(&entry.content)
-            .context("falha ao copiar item selecionado para o clipboard")?;
+        if entry.kind == ContentKind::Image {
+            let blob = entry
+                .image_blob
+                .as_deref()
+                .context("registro de imagem não possui dados PNG armazenados")?;
+            crate::watcher::set_clipboard_image(blob)
+                .context("falha ao copiar imagem selecionada para o clipboard")?;
+        } else {
+            crate::watcher::set_clipboard_text(&entry.content)
+                .context("falha ao copiar item selecionado para o clipboard")?;
+        }
 
         self.should_quit = true;
         Ok(())
@@ -277,6 +369,7 @@ impl Drop for TerminalGuard {
 pub fn run(storage: Arc<Storage>) -> Result<()> {
     let mut app = App::new(storage)?;
     let mut guard = TerminalGuard::init()?;
+    app.init_terminal_picker();
     let mut last_refresh = Instant::now();
 
     while !app.should_quit {
@@ -306,6 +399,7 @@ fn kind_style(kind: ContentKind) -> Style {
         ContentKind::CodeSnippet => Style::default().fg(Color::Green),
         ContentKind::ShellCommand => Style::default().fg(Color::Magenta),
         ContentKind::PlainText => Style::default().fg(Color::Gray),
+        ContentKind::Image => Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
     }
 }
 
@@ -393,66 +487,133 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
 
     frame.render_stateful_widget(list, center[0], &mut app.list_state);
 
-    let preview_widget = if let Some(entry) = app.selected_entry() {
-        let mut lines = Vec::new();
-        let ttl_info = match entry.expires_at {
-            Some(exp) => {
-                let rem = (exp - now_ts).max(0);
-                format!(" | Expira em {}m{:02}s", rem / 60, rem % 60)
+    if let Some(entry) = app.selected_entry().cloned() {
+        if entry.kind == ContentKind::Image {
+            let outer_block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Preview & Metadados ");
+            let inner_area = outer_block.inner(center[1]);
+            frame.render_widget(outer_block, center[1]);
+
+            let preview_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Min(4)])
+                .split(inner_area);
+
+            let (w, h) = entry.image_dimensions.unwrap_or((0, 0));
+            let size_bytes = entry.image_blob.as_ref().map_or(0, Vec::len);
+            let kb = size_bytes.div_ceil(1024).max(1);
+            let formatted_date = DateTime::from_timestamp(entry.updated_at, 0)
+                .map(|dt| {
+                    dt.with_timezone(&Local)
+                        .format("%d/%m/%Y %H:%M:%S")
+                        .to_string()
+                })
+                .unwrap_or_else(|| entry.updated_at.to_string());
+            let short_hash: String = entry.content_hash.chars().take(12).collect();
+
+            let meta_lines = vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!("#{} ", entry.id),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(entry.kind.tag(), kind_style(entry.kind)),
+                    Span::styled(
+                        format!(
+                            " | {w}x{h} px | {kb} KB | Usos: {} | Fixado: {}",
+                            entry.use_count,
+                            if entry.pinned { "Sim" } else { "Não" },
+                        ),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]),
+                Line::from(Span::styled(
+                    format!("Data: {formatted_date} | SHA: {short_hash}"),
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "─".repeat(inner_area.width as usize),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            frame.render_widget(Paragraph::new(meta_lines), preview_chunks[0]);
+
+            app.ensure_image_protocol();
+            if let Some((_, proto)) = app.image_preview_state.as_mut() {
+                let image_widget =
+                    StatefulImage::new(None).resize(Resize::Fit(Some(FilterType::CatmullRom)));
+                frame.render_stateful_widget(image_widget, preview_chunks[1], proto);
+            } else {
+                frame.render_widget(
+                    Paragraph::new("Não foi possível decodificar o preview da imagem.")
+                        .style(Style::default().fg(Color::Red)),
+                    preview_chunks[1],
+                );
             }
-            None => String::new(),
-        };
-        let short_hash: String = entry.content_hash.chars().take(12).collect();
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("#{} ", entry.id),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(entry.kind.tag(), kind_style(entry.kind)),
-            Span::styled(
-                format!(
-                    " | Usos: {} | Fixado: {} | SHA: {}{}",
-                    entry.use_count,
-                    if entry.pinned { "Sim" } else { "Não" },
-                    short_hash,
-                    ttl_info
-                ),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-        lines.push(Line::from(Span::styled(
-            "─".repeat(48),
-            Style::default().fg(Color::DarkGray),
-        )));
-
-        let body = entry.display_preview(app.reveal_secret);
-        let body_style = if entry.kind.is_secret() && !app.reveal_secret {
-            Style::default().fg(Color::Red)
         } else {
-            Style::default()
-        };
-        for raw_line in body.lines() {
-            lines.push(Line::from(Span::styled(raw_line.to_string(), body_style)));
-        }
+            app.image_preview_state = None;
+            let mut lines = Vec::new();
+            let ttl_info = match entry.expires_at {
+                Some(exp) => {
+                    let rem = (exp - now_ts).max(0);
+                    format!(" | Expira em {}m{:02}s", rem / 60, rem % 60)
+                }
+                None => String::new(),
+            };
+            let short_hash: String = entry.content_hash.chars().take(12).collect();
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("#{} ", entry.id),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(entry.kind.tag(), kind_style(entry.kind)),
+                Span::styled(
+                    format!(
+                        " | Usos: {} | Fixado: {} | SHA: {}{}",
+                        entry.use_count,
+                        if entry.pinned { "Sim" } else { "Não" },
+                        short_hash,
+                        ttl_info
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "─".repeat(48),
+                Style::default().fg(Color::DarkGray),
+            )));
 
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Preview & Metadados "),
-            )
-            .wrap(Wrap { trim: false })
+            let body = entry.display_preview(app.reveal_secret);
+            let body_style = if entry.kind.is_secret() && !app.reveal_secret {
+                Style::default().fg(Color::Red)
+            } else {
+                Style::default()
+            };
+            for raw_line in body.lines() {
+                lines.push(Line::from(Span::styled(raw_line.to_string(), body_style)));
+            }
+
+            let preview_widget = Paragraph::new(lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Preview & Metadados "),
+                )
+                .wrap(Wrap { trim: false });
+            frame.render_widget(preview_widget, center[1]);
+        }
     } else {
-        Paragraph::new("Nenhum item encontrado no histórico.")
+        app.image_preview_state = None;
+        let preview_widget = Paragraph::new("Nenhum item encontrado no histórico.")
             .style(Style::default().fg(Color::DarkGray))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Preview & Metadados "),
-            )
-    };
-
-    frame.render_widget(preview_widget, center[1]);
+            );
+        frame.render_widget(preview_widget, center[1]);
+    }
 
     // 3. Barra de atalhos / status no rodapé
     let shortcuts =
@@ -550,5 +711,71 @@ mod tests {
         // Segundo Esc encerra a TUI
         app.handle_key_event(key(KeyCode::Esc)).expect("esc quit");
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn image_entry_renders_preview_with_test_backend() {
+        let dir = tempdir().expect("tempdir");
+        let storage = Arc::new(Storage::open(dir.path().join("tui_img.db")).expect("open"));
+        let png = crate::watcher::encode_rgba_to_png(4, 4, &[200; 64]).expect("png");
+        let now = Utc::now().timestamp();
+        let entry = storage
+            .insert_or_update_image(png, 4, 4, now)
+            .expect("insert image")
+            .expect("entry");
+
+        let mut app = App::new(storage).expect("app");
+        assert_eq!(app.selected_entry().expect("img").id, entry.id);
+
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| draw_ui(frame, &mut app))
+            .expect("draw image ui");
+
+        assert!(app
+            .image_preview_state
+            .as_ref()
+            .is_some_and(|(id, _)| *id == entry.id));
+    }
+
+    #[test]
+    fn kitty_protocol_fallback_detects_cosmic_and_modern_terminals() {
+        assert!(should_use_kitty_protocol(
+            ProtocolType::Halfblocks,
+            Some("cosmic-term"),
+            Some("xterm-256color"),
+            None,
+        ));
+        assert!(should_use_kitty_protocol(
+            ProtocolType::Halfblocks,
+            None,
+            Some("xterm-kitty"),
+            None,
+        ));
+        assert!(should_use_kitty_protocol(
+            ProtocolType::Halfblocks,
+            Some("ghostty"),
+            None,
+            None,
+        ));
+        assert!(should_use_kitty_protocol(
+            ProtocolType::Halfblocks,
+            None,
+            Some("xterm-256color"),
+            Some("COSMIC"),
+        ));
+        assert!(!should_use_kitty_protocol(
+            ProtocolType::Halfblocks,
+            Some("gnome-terminal"),
+            Some("xterm-256color"),
+            Some("GNOME"),
+        ));
+        assert!(!should_use_kitty_protocol(
+            ProtocolType::Sixel,
+            Some("cosmic-term"),
+            None,
+            Some("COSMIC"),
+        ));
     }
 }

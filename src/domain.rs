@@ -10,6 +10,7 @@ pub enum ContentKind {
     CodeSnippet,
     ShellCommand,
     SecretToken,
+    Image,
 }
 
 impl ContentKind {
@@ -22,6 +23,7 @@ impl ContentKind {
             ContentKind::CodeSnippet => "[CODE]",
             ContentKind::ShellCommand => "[CMD]",
             ContentKind::SecretToken => "[SECRET]",
+            ContentKind::Image => "[IMG]",
         }
     }
 
@@ -44,14 +46,53 @@ pub struct ClipEntry {
     pub use_count: u64,
     pub pinned: bool,
     pub expires_at: Option<i64>,
+    pub image_blob: Option<Vec<u8>>,
+    pub image_dimensions: Option<(u32, u32)>,
 }
 
 impl ClipEntry {
-    /// Calcula o digest SHA-256 em hexadecimal para deduplicação de conteúdo.
-    pub fn compute_hash(content: &str) -> String {
+    /// Calcula o digest SHA-256 em hexadecimal de uma sequência arbitrária de bytes.
+    pub fn compute_bytes_hash(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(content.as_bytes());
+        hasher.update(bytes);
         hex::encode(hasher.finalize())
+    }
+
+    /// Calcula o digest SHA-256 em hexadecimal para deduplicação de conteúdo textual.
+    pub fn compute_hash(content: &str) -> String {
+        Self::compute_bytes_hash(content.as_bytes())
+    }
+
+    /// Formata a descrição resumida de uma imagem PNG capturada.
+    pub fn format_image_description(width: u32, height: u32, byte_len: usize) -> String {
+        let kb = byte_len.div_ceil(1024).max(1);
+        format!("Imagem PNG ({width}x{height}, {kb} KB)")
+    }
+
+    /// Constrói um `ClipEntry` para uma imagem PNG já codificada.
+    pub fn new_image(
+        id: u64,
+        png_bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+        now_ts: i64,
+    ) -> Self {
+        let content = Self::format_image_description(width, height, png_bytes.len());
+        let content_hash = Self::compute_bytes_hash(&png_bytes);
+        Self {
+            id,
+            content,
+            pretty_json: None,
+            kind: ContentKind::Image,
+            created_at: now_ts,
+            updated_at: now_ts,
+            content_hash,
+            use_count: 1,
+            pinned: false,
+            expires_at: None,
+            image_blob: Some(png_bytes),
+            image_dimensions: Some((width, height)),
+        }
     }
 
     /// Verifica se o item possui TTL configurado e já expirou no instante `now_ts`.
@@ -141,6 +182,8 @@ mod tests {
             use_count: 1,
             pinned: false,
             expires_at: None,
+            image_blob: None,
+            image_dimensions: None,
         }
     }
 

@@ -16,13 +16,13 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 
 use crate::storage::Storage;
-use crate::watcher::{ClipboardWatcher, GC_INTERVAL};
+use crate::watcher::{ClipboardPayload, ClipboardWatcher, GC_INTERVAL};
 
 #[derive(Parser, Debug)]
 #[command(
     name = "clipvault",
     version,
-    about = "Gerenciador e Time-Machine inteligente de clipboard para Linux (X11)"
+    about = "Gerenciador e Time-Machine inteligente de clipboard para Linux (Wayland/X11)"
 )]
 struct Cli {
     /// Caminho alternativo para o arquivo do banco SQLite local (.db)
@@ -57,29 +57,45 @@ fn run_daemon(storage: Arc<Storage>) -> Result<()> {
 
     loop {
         match rx.recv_timeout(Duration::from_millis(250)) {
-            Ok(event) => match storage.insert_or_update(&event.content, event.timestamp) {
-                Ok(Some(entry)) => {
-                    let bytes = entry.content.len();
-                    if entry.kind.is_secret() {
-                        println!(
-                            "[clipvault-daemon] Capturado: {} ({bytes} bytes) [conteúdo sensível oculto, TTL: {}s]",
-                            entry.kind.tag(),
-                            classifier::SECRET_TTL_SECONDS
-                        );
-                    } else {
-                        println!(
-                            "[clipvault-daemon] Capturado: {} ({bytes} bytes) — {}",
-                            entry.kind.tag(),
-                            entry.single_line_summary(false, 60)
-                        );
+            Ok(event) => {
+                let save_result = match event.payload {
+                    ClipboardPayload::Text(text) => {
+                        storage.insert_or_update(&text, event.timestamp)
                     }
-                    let _ = std::io::stdout().flush();
+                    ClipboardPayload::Image {
+                        png_bytes,
+                        width,
+                        height,
+                    } => storage.insert_or_update_image(png_bytes, width, height, event.timestamp),
+                };
+
+                match save_result {
+                    Ok(Some(entry)) => {
+                        let bytes = entry
+                            .image_blob
+                            .as_ref()
+                            .map_or(entry.content.len(), Vec::len);
+                        if entry.kind.is_secret() {
+                            println!(
+                                "[clipvault-daemon] Capturado: {} ({bytes} bytes) [conteúdo sensível oculto, TTL: {}s]",
+                                entry.kind.tag(),
+                                classifier::SECRET_TTL_SECONDS
+                            );
+                        } else {
+                            println!(
+                                "[clipvault-daemon] Capturado: {} ({bytes} bytes) — {}",
+                                entry.kind.tag(),
+                                entry.single_line_summary(false, 60)
+                            );
+                        }
+                        let _ = std::io::stdout().flush();
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        eprintln!("[clipvault-daemon] Erro ao salvar item no SQLite: {err:#}");
+                    }
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    eprintln!("[clipvault-daemon] Erro ao salvar item no SQLite: {err:#}");
-                }
-            },
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
