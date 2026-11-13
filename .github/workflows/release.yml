@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-linux-x86_64:
+    name: Release Linux x86_64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies (X11/XCB headers for arboard)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Build release binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: Package release archive
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-gnu/release/clipvault dist/
+          cp LICENSE README.md dist/
+          cp contrib/systemd/clipvault.service dist/
+          tar -C dist -czf clipvault-linux-x86_64.tar.gz clipvault LICENSE README.md clipvault.service
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: clipvault-linux-x86_64.tar.gz
+          generate_release_notes: true

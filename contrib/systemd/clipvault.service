@@ -1,0 +1,14 @@
+[Unit]
+Description=ClipVault Clipboard Time-Machine Daemon
+Documentation=https://github.com/Jvamg/clipvault
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/clipvault daemon
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

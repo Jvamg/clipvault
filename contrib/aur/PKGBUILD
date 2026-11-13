@@ -1,0 +1,38 @@
+# Maintainer: João Vitor Araujo Moraes Guzzo <https://github.com/Jvamg>
+pkgname=clipvault
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Smart clipboard manager and Time-Machine for Linux (Wayland & X11) written in Rust"
+arch=('x86_64' 'aarch64')
+url="https://github.com/Jvamg/clipvault"
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo')
+optdepends=(
+  'wl-clipboard: Wayland clipboard integration'
+  'xclip: X11 clipboard integration'
+  'xsel: X11 clipboard fallback'
+  'xdg-utils: Open full-resolution images in external viewer'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --release --locked
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo test --locked
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/clipvault" "$pkgdir/usr/bin/clipvault"
+  install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "contrib/systemd/clipvault.service" "$pkgdir/usr/lib/systemd/user/clipvault.service"
+}

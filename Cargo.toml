@@ -2,7 +2,14 @@
 name = "clipvault"
 version = "0.1.0"
 edition = "2021"
-description = "Gerenciador e Time-Machine inteligente de clipboard para Linux (X11)"
+authors = ["João Vitor Araujo Moraes Guzzo"]
+description = "Gerenciador e Time-Machine inteligente de clipboard para Linux (Wayland e X11)"
+readme = "README.md"
+license = "MIT"
+repository = "https://github.com/Jvamg/clipvault"
+homepage = "https://github.com/Jvamg/clipvault"
+keywords = ["clipboard", "tui", "wayland", "linux", "security"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1.0"
