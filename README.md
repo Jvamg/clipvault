@@ -18,7 +18,7 @@ Gerenciador e **Time-Machine inteligente de clipboard** para Linux (Pop!_OS / X1
   - Preview mascarado automaticamente na lista e no painel de detalhes (revelado apenas sob demanda com `s`).
   - **TTL automático de 5 minutos (300 segundos)** com remoção pelo coletor de lixo (*garbage collector*) e nas leituras do banco.
 - **Persistência Rápida & Deduplicação**:
-  - Banco embutido `redb` sem dependências externas em C.
+  - Banco SQLite embutido via `rusqlite` (`bundled`, sem dependências externas) em modo **WAL** (`journal_mode = WAL`, `busy_timeout = 5000`), permitindo acesso concorrente seguro entre o `daemon` e a `ui`.
   - Deduplicação por hash **SHA-256**: copiar o mesmo conteúdo novamente atualiza o timestamp, incrementa o contador de uso e preserva a fixação (`pinned`).
 - **Interface TUI Interativa (`ratatui` + `crossterm`)**:
   - Busca *fuzzy* em tempo real (`fuzzy-matcher`), painel dividido entre histórico e preview formatado.
@@ -29,7 +29,7 @@ Gerenciador e **Time-Machine inteligente de clipboard** para Linux (Pop!_OS / X1
 
 - `src/domain.rs` — Modelos centrais (`ClipEntry`, `ContentKind`), cálculo de SHA-256, formatação de preview seguro e tempo relativo.
 - `src/classifier.rs` — Motor heurístico baseado em `regex` e `serde_json` com priorização de segurança para `SecretToken`.
-- `src/storage.rs` — Persistência local embutida com `redb`, CRUD, deduplicação por hash, controle de `last_restored_hash`, limpeza de expirados e busca *fuzzy*.
+- `src/storage.rs` — Persistência local embutida com `rusqlite` (SQLite em modo WAL), CRUD, deduplicação por hash, controle de `last_restored_hash`, limpeza de expirados e busca *fuzzy*.
 - `src/watcher.rs` — Thread de monitoramento do clipboard via `arboard` com canal `std::sync::mpsc`, filtro anti-eco e GC periódico.
 - `src/tui.rs` — Interface interativa de terminal com `ratatui` + `crossterm`.
 - `src/main.rs` — CLI via `clap` com suporte aos subcomandos `daemon` e `ui` (padrão).
@@ -62,10 +62,10 @@ O binário otimizado também fica disponível diretamente em `./target/release/c
 clipvault daemon
 ```
 
-O banco local padrão é criado automaticamente em `~/.local/share/clipvault/clipvault.redb`. Você pode informar outro arquivo com `--db`:
+O banco local padrão é criado automaticamente em `~/.local/share/clipvault/clipvault.db`. Você pode informar outro arquivo com `--db`:
 
 ```bash
-clipvault --db /tmp/meu-historico.redb daemon
+clipvault --db /tmp/meu-historico.db daemon
 ```
 
 ### 2. Abrir a interface interativa (`ui`)

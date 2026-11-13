@@ -4,6 +4,7 @@ mod storage;
 mod tui;
 mod watcher;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
@@ -24,7 +25,7 @@ use crate::watcher::{ClipboardWatcher, GC_INTERVAL};
     about = "Gerenciador e Time-Machine inteligente de clipboard para Linux (X11)"
 )]
 struct Cli {
-    /// Caminho alternativo para o arquivo do banco local redb
+    /// Caminho alternativo para o arquivo do banco SQLite local (.db)
     #[arg(long, global = true, value_name = "PATH")]
     db: Option<PathBuf>,
 
@@ -50,32 +51,49 @@ fn run_daemon(storage: Arc<Storage>) -> Result<()> {
         watcher::POLL_INTERVAL.as_millis(),
         classifier::SECRET_TTL_SECONDS
     );
+    let _ = std::io::stdout().flush();
 
     let mut last_gc = Instant::now();
 
     loop {
-        match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(entry) => {
-                let preview = entry.single_line_summary(false, 60);
-                println!(
-                    "[clipvault-daemon] #{} {} (usos: {}): {}",
-                    entry.id,
-                    entry.kind.tag(),
-                    entry.use_count,
-                    preview
-                );
-            }
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(event) => match storage.insert_or_update(&event.content, event.timestamp) {
+                Ok(Some(entry)) => {
+                    let bytes = entry.content.len();
+                    if entry.kind.is_secret() {
+                        println!(
+                            "[clipvault-daemon] Capturado: {} ({bytes} bytes) [conteúdo sensível oculto, TTL: {}s]",
+                            entry.kind.tag(),
+                            classifier::SECRET_TTL_SECONDS
+                        );
+                    } else {
+                        println!(
+                            "[clipvault-daemon] Capturado: {} ({bytes} bytes) — {}",
+                            entry.kind.tag(),
+                            entry.single_line_summary(false, 60)
+                        );
+                    }
+                    let _ = std::io::stdout().flush();
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!("[clipvault-daemon] Erro ao salvar item no SQLite: {err:#}");
+                }
+            },
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
         if last_gc.elapsed() >= GC_INTERVAL {
             let now_ts = Utc::now().timestamp();
-            if let Ok(purged) = storage.purge_expired(now_ts) {
-                if purged > 0 {
-                    println!(
-                        "[clipvault-daemon] GC removeu {purged} segredo(s) expirado(s)."
-                    );
+            match storage.purge_expired(now_ts) {
+                Ok(purged) if purged > 0 => {
+                    println!("[clipvault-daemon] GC removeu {purged} segredo(s) expirado(s).");
+                    let _ = std::io::stdout().flush();
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    eprintln!("[clipvault-daemon] Erro no GC de segredos expirados: {err:#}");
                 }
             }
             last_gc = Instant::now();

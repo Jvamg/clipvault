@@ -1,25 +1,26 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use redb::{Database, ReadableTable, TableDefinition};
+use rusqlite::types::Type;
+use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 
 use crate::classifier::{self, SECRET_TTL_SECONDS};
-use crate::domain::ClipEntry;
+use crate::domain::{ClipEntry, ContentKind};
 
-const ENTRIES_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("entries");
-const META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
-const META_NEXT_ID_KEY: &str = "next_id";
 const META_LAST_RESTORED_HASH_KEY: &str = "last_restored_hash";
 
-/// Camada de persistência local embutida sobre `redb`.
+/// Camada de persistência local embutida sobre SQLite (`rusqlite`) em modo WAL.
 pub struct Storage {
-    db: Database,
+    conn: Mutex<Connection>,
 }
 
 impl Storage {
-    /// Abre ou cria o banco `redb` no caminho especificado.
+    /// Abre ou cria o banco SQLite no caminho especificado configurando WAL,
+    /// sincronização e timeout para acesso concorrente entre `daemon` e `ui`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_ref = path.as_ref();
         if let Some(parent) = path_ref.parent() {
@@ -30,25 +31,61 @@ impl Storage {
             }
         }
 
-        let db = Database::create(path_ref)
-            .with_context(|| format!("falha ao abrir banco redb: {}", path_ref.display()))?;
+        let conn = Connection::open(path_ref)
+            .with_context(|| format!("falha ao abrir banco sqlite: {}", path_ref.display()))?;
 
-        let write_txn = db.begin_write()?;
-        {
-            let _ = write_txn.open_table(ENTRIES_TABLE)?;
-            let _ = write_txn.open_table(META_TABLE)?;
-        }
-        write_txn.commit()?;
+        // Garante timeout antes de executar PRAGMAs e criação de schema sob concorrência.
+        conn.busy_timeout(Duration::from_millis(5000))
+            .context("falha ao configurar busy_timeout no SQLite")?;
 
-        Ok(Self { db })
+        conn.execute_batch(
+            "
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA busy_timeout = 5000;
+
+            CREATE TABLE IF NOT EXISTS entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                pretty_json TEXT,
+                kind TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                content_hash TEXT NOT NULL UNIQUE,
+                use_count INTEGER NOT NULL DEFAULT 1,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                expires_at INTEGER
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_content_hash
+                ON entries(content_hash);
+
+            CREATE INDEX IF NOT EXISTS idx_entries_sort
+                ON entries(pinned DESC, updated_at DESC, id DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_entries_expires_at
+                ON entries(expires_at)
+                WHERE expires_at IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            ",
+        )
+        .context("falha ao inicializar PRAGMAs e schema SQLite")?;
+
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
-    /// Caminho padrão do banco local (`~/.local/share/clipvault/clipvault.redb`).
+    /// Caminho padrão do banco local (`~/.local/share/clipvault/clipvault.db`).
     pub fn default_db_path() -> PathBuf {
         dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("clipvault")
-            .join("clipvault.redb")
+            .join("clipvault.db")
     }
 
     /// Insere um novo item ou deduplica pelo SHA-256 se já existir.
@@ -59,174 +96,212 @@ impl Storage {
         }
 
         let target_hash = ClipEntry::compute_hash(content);
-        let write_txn = self.db.begin_write()?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let saved_entry = {
-            let mut entries_table = write_txn.open_table(ENTRIES_TABLE)?;
-            let mut meta_table = write_txn.open_table(META_TABLE)?;
+        tx.execute(
+            "DELETE FROM entries WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+            params![now_ts],
+        )?;
 
-            Self::purge_expired_in_table(&mut entries_table, now_ts)?;
+        let existing = tx
+            .query_row(
+                "SELECT id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at
+                 FROM entries
+                 WHERE content_hash = ?1",
+                params![target_hash],
+                row_to_entry,
+            )
+            .optional()?;
 
-            let mut existing_match: Option<ClipEntry> = None;
-            {
-                let iter = entries_table.iter()?;
-                for item in iter {
-                    let (_, raw_val) = item?;
-                    let entry: ClipEntry = serde_json::from_slice(raw_val.value())?;
-                    if entry.content_hash == target_hash {
-                        existing_match = Some(entry);
-                        break;
-                    }
-                }
+        let saved_entry = if let Some(mut entry) = existing {
+            entry.updated_at = now_ts;
+            entry.use_count = entry.use_count.saturating_add(1);
+            if entry.kind.is_secret() {
+                entry.expires_at = Some(now_ts + SECRET_TTL_SECONDS);
             }
 
-            let entry = if let Some(mut existing) = existing_match {
-                existing.updated_at = now_ts;
-                existing.use_count = existing.use_count.saturating_add(1);
-                if existing.kind.is_secret() {
-                    existing.expires_at = Some(now_ts + SECRET_TTL_SECONDS);
-                }
-                existing
-            } else {
-                let next_id = match meta_table.get(META_NEXT_ID_KEY)? {
-                    Some(raw) => {
-                        let bytes: [u8; 8] = raw
-                            .value()
-                            .try_into()
-                            .context("next_id corrompido na tabela meta")?;
-                        u64::from_le_bytes(bytes)
-                    }
-                    None => 1,
-                };
-                meta_table.insert(META_NEXT_ID_KEY, (next_id + 1).to_le_bytes().as_slice())?;
-                classifier::build_entry(next_id, content, now_ts)
-            };
-
-            let encoded = serde_json::to_vec(&entry)?;
-            entries_table.insert(entry.id, encoded.as_slice())?;
+            tx.execute(
+                "UPDATE entries
+                 SET updated_at = ?1, use_count = ?2, expires_at = ?3
+                 WHERE id = ?4",
+                params![
+                    entry.updated_at,
+                    entry.use_count as i64,
+                    entry.expires_at,
+                    entry.id as i64
+                ],
+            )?;
+            entry
+        } else {
+            let mut entry = classifier::build_entry(0, content, now_ts);
+            tx.execute(
+                "INSERT INTO entries (
+                    content, pretty_json, kind, created_at, updated_at,
+                    content_hash, use_count, pinned, expires_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    entry.content,
+                    entry.pretty_json,
+                    kind_to_str(entry.kind),
+                    entry.created_at,
+                    entry.updated_at,
+                    entry.content_hash,
+                    entry.use_count as i64,
+                    i64::from(entry.pinned),
+                    entry.expires_at,
+                ],
+            )?;
+            entry.id = tx.last_insert_rowid() as u64;
             entry
         };
 
-        write_txn.commit()?;
+        tx.commit()?;
         Ok(Some(saved_entry))
     }
 
     /// Busca uma entrada específica pelo ID.
     #[allow(dead_code)]
     pub fn get(&self, id: u64) -> Result<Option<ClipEntry>> {
-        let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(ENTRIES_TABLE)?;
-        match table.get(id)? {
-            Some(raw) => Ok(Some(serde_json::from_slice(raw.value())?)),
-            None => Ok(None),
-        }
+        let conn = self.lock_conn()?;
+        let entry = conn
+            .query_row(
+                "SELECT id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at
+                 FROM entries
+                 WHERE id = ?1",
+                params![id as i64],
+                row_to_entry,
+            )
+            .optional()?;
+        Ok(entry)
     }
 
     /// Lista todos os itens válidos ordenados por fixados no topo, depois mais recentes.
     pub fn list_all(&self, now_ts: i64) -> Result<Vec<ClipEntry>> {
-        let entries = self.load_active_entries(now_ts)?;
-        Ok(Self::sort_default(entries))
+        self.load_active_entries(now_ts)
     }
 
     /// Alterna o estado `pinned` de um item existente.
     pub fn toggle_pin(&self, id: u64) -> Result<Option<ClipEntry>> {
-        let write_txn = self.db.begin_write()?;
-        let updated = {
-            let mut table = write_txn.open_table(ENTRIES_TABLE)?;
-            let current = match table.get(id)? {
-                Some(raw) => Some(serde_json::from_slice::<ClipEntry>(raw.value())?),
-                None => None,
-            };
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-            if let Some(mut entry) = current {
-                entry.pinned = !entry.pinned;
-                let encoded = serde_json::to_vec(&entry)?;
-                table.insert(id, encoded.as_slice())?;
-                Some(entry)
-            } else {
-                None
-            }
+        let current = tx
+            .query_row(
+                "SELECT id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at
+                 FROM entries
+                 WHERE id = ?1",
+                params![id as i64],
+                row_to_entry,
+            )
+            .optional()?;
+
+        let updated = if let Some(mut entry) = current {
+            entry.pinned = !entry.pinned;
+            tx.execute(
+                "UPDATE entries SET pinned = ?1 WHERE id = ?2",
+                params![i64::from(entry.pinned), id as i64],
+            )?;
+            Some(entry)
+        } else {
+            None
         };
-        write_txn.commit()?;
+
+        tx.commit()?;
         Ok(updated)
     }
 
     /// Remove um item pelo ID. Retorna `true` se o item existia.
     pub fn delete(&self, id: u64) -> Result<bool> {
-        let write_txn = self.db.begin_write()?;
-        let existed = {
-            let mut table = write_txn.open_table(ENTRIES_TABLE)?;
-            let removed = table.remove(id)?.is_some();
-            removed
-        };
-        write_txn.commit()?;
-        Ok(existed)
+        let conn = self.lock_conn()?;
+        let removed = conn.execute("DELETE FROM entries WHERE id = ?1", params![id as i64])?;
+        Ok(removed > 0)
     }
 
     /// Registra que o usuário restaurou este item para o clipboard do sistema,
     /// salvando seu hash na tabela meta para o watcher ignorar o evento de eco.
     pub fn record_restore(&self, id: u64, now_ts: i64) -> Result<Option<ClipEntry>> {
-        let write_txn = self.db.begin_write()?;
-        let updated = {
-            let mut entries_table = write_txn.open_table(ENTRIES_TABLE)?;
-            let mut meta_table = write_txn.open_table(META_TABLE)?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-            let current = match entries_table.get(id)? {
-                Some(raw) => Some(serde_json::from_slice::<ClipEntry>(raw.value())?),
-                None => None,
-            };
+        let current = tx
+            .query_row(
+                "SELECT id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at
+                 FROM entries
+                 WHERE id = ?1",
+                params![id as i64],
+                row_to_entry,
+            )
+            .optional()?;
 
-            match current {
-                Some(mut entry) if !entry.is_expired(now_ts) => {
-                    entry.use_count = entry.use_count.saturating_add(1);
-                    entry.updated_at = now_ts;
-                    let encoded = serde_json::to_vec(&entry)?;
-                    entries_table.insert(id, encoded.as_slice())?;
-                    meta_table.insert(META_LAST_RESTORED_HASH_KEY, entry.content_hash.as_bytes())?;
-                    Some(entry)
-                }
-                Some(_) => {
-                    entries_table.remove(id)?;
-                    None
-                }
-                None => None,
+        let updated = match current {
+            Some(mut entry) if !entry.is_expired(now_ts) => {
+                entry.use_count = entry.use_count.saturating_add(1);
+                entry.updated_at = now_ts;
+                tx.execute(
+                    "UPDATE entries SET use_count = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![entry.use_count as i64, entry.updated_at, id as i64],
+                )?;
+                tx.execute(
+                    "INSERT INTO meta (key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    params![META_LAST_RESTORED_HASH_KEY, entry.content_hash],
+                )?;
+                Some(entry)
             }
+            Some(_) => {
+                tx.execute("DELETE FROM entries WHERE id = ?1", params![id as i64])?;
+                None
+            }
+            None => None,
         };
-        write_txn.commit()?;
+
+        tx.commit()?;
         Ok(updated)
     }
 
     /// Lê e consome o último hash restaurado pela TUI para evitar loop no watcher.
     pub fn consume_last_restored_hash(&self) -> Result<Option<String>> {
-        {
-            let read_txn = self.db.begin_read()?;
-            let meta_table = read_txn.open_table(META_TABLE)?;
-            if meta_table.get(META_LAST_RESTORED_HASH_KEY)?.is_none() {
-                return Ok(None);
-            }
+        let mut conn = self.lock_conn()?;
+
+        let exists: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_LAST_RESTORED_HASH_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if exists.is_none() {
+            return Ok(None);
         }
 
-        let write_txn = self.db.begin_write()?;
-        let hash = {
-            let mut meta_table = write_txn.open_table(META_TABLE)?;
-            let found = match meta_table.remove(META_LAST_RESTORED_HASH_KEY)? {
-                Some(raw) => Some(String::from_utf8(raw.value().to_vec())?),
-                None => None,
-            };
-            found
-        };
-        write_txn.commit()?;
-        Ok(hash)
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let value: Option<String> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                params![META_LAST_RESTORED_HASH_KEY],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if value.is_some() {
+            tx.execute(
+                "DELETE FROM meta WHERE key = ?1",
+                params![META_LAST_RESTORED_HASH_KEY],
+            )?;
+        }
+        tx.commit()?;
+        Ok(value)
     }
 
     /// Remove todas as entradas cujo TTL já expirou em `now_ts`.
     pub fn purge_expired(&self, now_ts: i64) -> Result<usize> {
-        let write_txn = self.db.begin_write()?;
-        let removed = {
-            let mut table = write_txn.open_table(ENTRIES_TABLE)?;
-            Self::purge_expired_in_table(&mut table, now_ts)?
-        };
-        write_txn.commit()?;
+        let conn = self.lock_conn()?;
+        let removed = conn.execute(
+            "DELETE FROM entries WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+            params![now_ts],
+        )?;
         Ok(removed)
     }
 
@@ -235,7 +310,7 @@ impl Storage {
         let trimmed = query.trim();
         let active = self.load_active_entries(now_ts)?;
         if trimmed.is_empty() {
-            return Ok(Self::sort_default(active));
+            return Ok(active);
         }
 
         let matcher = SkimMatcherV2::default();
@@ -261,73 +336,100 @@ impl Storage {
     }
 
     fn load_active_entries(&self, now_ts: i64) -> Result<Vec<ClipEntry>> {
-        let mut active = Vec::new();
-        let mut has_expired = false;
+        let conn = self.lock_conn()?;
 
-        {
-            let read_txn = self.db.begin_read()?;
-            let table = read_txn.open_table(ENTRIES_TABLE)?;
-            for item in table.iter()? {
-                let (_, raw_val) = item?;
-                let entry: ClipEntry = serde_json::from_slice(raw_val.value())?;
-                if entry.is_expired(now_ts) {
-                    has_expired = true;
-                } else {
-                    active.push(entry);
-                }
-            }
-        }
+        let has_expired: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM entries WHERE expires_at IS NOT NULL AND expires_at <= ?1)",
+            params![now_ts],
+            |row| row.get::<_, i64>(0).map(|v| v != 0),
+        )?;
 
         if has_expired {
-            let _ = self.purge_expired(now_ts)?;
+            conn.execute(
+                "DELETE FROM entries WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+                params![now_ts],
+            )?;
         }
 
+        let mut stmt = conn.prepare(
+            "SELECT id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at
+             FROM entries
+             WHERE expires_at IS NULL OR expires_at > ?1
+             ORDER BY pinned DESC, updated_at DESC, id DESC",
+        )?;
+
+        let rows = stmt.query_map(params![now_ts], row_to_entry)?;
+        let mut active = Vec::new();
+        for row in rows {
+            active.push(row?);
+        }
         Ok(active)
     }
 
-    fn purge_expired_in_table(
-        table: &mut redb::Table<u64, &[u8]>,
-        now_ts: i64,
-    ) -> Result<usize> {
-        let mut expired_ids = Vec::new();
-        {
-            let iter = table.iter()?;
-            for item in iter {
-                let (key, raw_val) = item?;
-                let entry: ClipEntry = serde_json::from_slice(raw_val.value())?;
-                if entry.is_expired(now_ts) {
-                    expired_ids.push(key.value());
-                }
-            }
-        }
-
-        let count = expired_ids.len();
-        for id in expired_ids {
-            table.remove(id)?;
-        }
-        Ok(count)
+    fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| anyhow::anyhow!("mutex da conexão SQLite envenenado"))
     }
+}
 
-    fn sort_default(mut entries: Vec<ClipEntry>) -> Vec<ClipEntry> {
-        entries.sort_by(|a, b| {
-            b.pinned
-                .cmp(&a.pinned)
-                .then_with(|| b.updated_at.cmp(&a.updated_at))
-                .then_with(|| b.id.cmp(&a.id))
-        });
-        entries
+fn kind_to_str(kind: ContentKind) -> &'static str {
+    match kind {
+        ContentKind::PlainText => "PlainText",
+        ContentKind::Url => "Url",
+        ContentKind::Json => "Json",
+        ContentKind::CodeSnippet => "CodeSnippet",
+        ContentKind::ShellCommand => "ShellCommand",
+        ContentKind::SecretToken => "SecretToken",
     }
+}
+
+fn kind_from_str(raw: &str) -> std::result::Result<ContentKind, rusqlite::Error> {
+    match raw {
+        "PlainText" => Ok(ContentKind::PlainText),
+        "Url" => Ok(ContentKind::Url),
+        "Json" => Ok(ContentKind::Json),
+        "CodeSnippet" => Ok(ContentKind::CodeSnippet),
+        "ShellCommand" => Ok(ContentKind::ShellCommand),
+        "SecretToken" => Ok(ContentKind::SecretToken),
+        other => Err(rusqlite::Error::FromSqlConversionFailure(
+            3,
+            Type::Text,
+            format!("ContentKind inválido no banco: {other}").into(),
+        )),
+    }
+}
+
+fn row_to_entry(row: &Row<'_>) -> rusqlite::Result<ClipEntry> {
+    let kind_raw: String = row.get(3)?;
+    let kind = kind_from_str(&kind_raw)?;
+
+    Ok(ClipEntry {
+        id: row.get::<_, i64>(0)? as u64,
+        content: row.get(1)?,
+        pretty_json: row.get(2)?,
+        kind,
+        created_at: row.get(4)?,
+        updated_at: row.get(5)?,
+        content_hash: row.get(6)?,
+        use_count: row.get::<_, i64>(7)? as u64,
+        pinned: row.get::<_, i64>(8)? != 0,
+        expires_at: row.get(9)?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::thread;
+
     use super::*;
     use crate::domain::ContentKind;
     use tempfile::tempdir;
 
     fn test_storage() -> (tempfile::TempDir, Storage) {
         let dir = tempdir().expect("temp dir");
-        let db_path = dir.path().join("test_clipvault.redb");
+        let db_path = dir.path().join("test_clipvault.db");
         let storage = Storage::open(&db_path).expect("open storage");
         (dir, storage)
     }
@@ -335,7 +437,7 @@ mod tests {
     #[test]
     fn crud_and_persistence_work() {
         let dir = tempdir().expect("temp dir");
-        let db_path = dir.path().join("persist.redb");
+        let db_path = dir.path().join("persist.db");
 
         let id = {
             let storage = Storage::open(&db_path).expect("open");
@@ -470,12 +572,82 @@ mod tests {
             .insert_or_update("c l i p _ v a u l t _ outro", 200)
             .expect("insert");
         let exact = storage
-            .insert_or_update("clipvault daemon --db local.redb", 150)
+            .insert_or_update("clipvault daemon --db local.db", 150)
             .expect("insert")
             .expect("entry");
 
         let results = storage.search("clipvault", 300).expect("search");
         assert!(!results.is_empty());
         assert_eq!(results[0].id, exact.id);
+    }
+
+    #[test]
+    fn concurrent_access_between_two_storage_instances_on_same_db() {
+        let dir = tempdir().expect("temp dir");
+        let db_path = dir.path().join("concurrent.db");
+
+        let storage_daemon = Arc::new(Storage::open(&db_path).expect("open daemon storage"));
+        let storage_ui = Arc::new(Storage::open(&db_path).expect("open ui storage"));
+
+        {
+            let conn = storage_daemon.lock_conn().expect("lock");
+            let mode: String = conn
+                .query_row("PRAGMA journal_mode;", [], |row| row.get(0))
+                .expect("read journal_mode");
+            assert_eq!(mode.to_lowercase(), "wal");
+        }
+
+        let seed = storage_daemon
+            .insert_or_update("seed clipvault concurrent entry", 1_000)
+            .expect("seed insert")
+            .expect("seed entry");
+
+        let daemon_writer = Arc::clone(&storage_daemon);
+        let daemon_handle = thread::spawn(move || {
+            for idx in 0..30 {
+                let text = format!("daemon clip item #{idx}");
+                daemon_writer
+                    .insert_or_update(&text, 1_001 + idx as i64)
+                    .expect("concurrent daemon insert");
+                let _ = daemon_writer
+                    .consume_last_restored_hash()
+                    .expect("concurrent consume hash");
+                let _ = daemon_writer
+                    .purge_expired(1_001 + idx as i64)
+                    .expect("concurrent purge");
+            }
+        });
+
+        let ui_worker = Arc::clone(&storage_ui);
+        let ui_handle = thread::spawn(move || {
+            for idx in 0..30 {
+                let entries = ui_worker.list_all(2_000).expect("concurrent ui list");
+                assert!(!entries.is_empty());
+                let matches = ui_worker
+                    .search("clip", 2_000)
+                    .expect("concurrent ui search");
+                assert!(!matches.is_empty());
+
+                if idx == 10 {
+                    ui_worker
+                        .toggle_pin(seed.id)
+                        .expect("concurrent ui pin");
+                }
+                if idx == 20 {
+                    ui_worker
+                        .record_restore(seed.id, 1_500)
+                        .expect("concurrent ui restore");
+                }
+            }
+        });
+
+        daemon_handle.join().expect("daemon thread should succeed");
+        ui_handle.join().expect("ui thread should succeed");
+
+        let final_entries = storage_ui.list_all(2_000).expect("final list");
+        assert_eq!(final_entries.len(), 31);
+        assert_eq!(final_entries[0].id, seed.id);
+        assert!(final_entries[0].pinned);
+        assert_eq!(final_entries[0].use_count, 2);
     }
 }

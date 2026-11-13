@@ -1,5 +1,5 @@
 /target
 *.db
-*.redb
-*.redb-*
+*.db-wal
+*.db-shm
 .DS_Store

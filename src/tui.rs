@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use arboard::Clipboard;
 use chrono::Utc;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -176,14 +175,9 @@ impl App {
         // Registra o hash antes de copiar para que o daemon em execução ignore o eco.
         let _ = self.storage.record_restore(entry.id, now_ts)?;
 
-        let mut clipboard = Clipboard::new()
-            .context("não foi possível acessar o clipboard do sistema via arboard")?;
-        clipboard
-            .set_text(entry.content.clone())
+        crate::watcher::set_clipboard_text(&entry.content)
             .context("falha ao copiar item selecionado para o clipboard")?;
 
-        // Breve janela para o gerenciador de seleção X11 capturar o conteúdo antes do exit.
-        std::thread::sleep(Duration::from_millis(50));
         self.should_quit = true;
         Ok(())
     }
@@ -484,7 +478,7 @@ mod tests {
 
     fn test_app() -> (tempfile::TempDir, App) {
         let dir = tempdir().expect("tempdir");
-        let storage = Arc::new(Storage::open(dir.path().join("tui_test.redb")).expect("open"));
+        let storage = Arc::new(Storage::open(dir.path().join("tui_test.db")).expect("open"));
         let now = Utc::now().timestamp();
         storage
             .insert_or_update("primeiro item normal", now - 20)
