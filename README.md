@@ -46,7 +46,7 @@ O `clipvault` funciona em **qualquer distribuição Linux (Wayland e X11)** — 
 ### 2. Clonar, Compilar e Instalar em `~/.local/bin`
 
 ```bash
-git clone <url-do-repositorio>
+git clone [https://github.com/Jvamg/clipvault.git](https://github.com/Jvamg/clipvault.git)
 cd clipvault
 cargo build --release
 mkdir -p ~/.local/bin
