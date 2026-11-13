@@ -13,6 +13,7 @@ Gerenciador e **Time-Machine inteligente de clipboard** para Linux (Pop!_OS / X1
   - `[CODE]` — trechos de código-fonte (Rust, JS/TS, Python, C/C++, etc.).
   - `[CMD]` — comandos de terminal, *pipes* e scripts shell (`#!/bin/bash`, `cargo`, `git`, `docker`, etc.).
   - `[SECRET]` — tokens, chaves de API (`sk-...`, `ghp_...`, `AKIA...`, `AIza...`), `Bearer` tokens, JWTs, chaves privadas PEM/OpenSSH e atribuições explícitas de senha.
+  - `[IMG]` — capturas de tela e imagens PNG copiadas (com preview gráfico no terminal via Sixel/Kitty/Halfblocks, restauração via `Enter` e abertura externa em resolução original com `v`).
   - `[TEXT]` — texto simples (fallback).
 - **Segurança por Padrão (`SecretToken`)**:
   - Preview mascarado automaticamente na lista e no painel de detalhes (revelado apenas sob demanda com `s`).
@@ -82,7 +83,8 @@ clipvault ui
 
 | Atalho | Ação |
 | --- | --- |
-| `Enter` | Copia o item selecionado de volta para o clipboard e sai da TUI |
+| `Enter` | Copia o item selecionado (texto ou imagem `[IMG]`) de volta para o clipboard e sai da TUI |
+| `v` (ou `Ctrl+V`) | Salva a imagem selecionada (`[IMG]`) em `/tmp/clipvault-preview.png` e abre no visualizador padrão (`xdg-open`) |
 | `↑` / `↓` ou `j` / `k` | Navega pelo histórico (oculta segredos novamente ao trocar de item) |
 | `/` ou `Tab` | Alterna o foco para digitar na barra de busca *fuzzy* em tempo real |
 | `p` (ou `Ctrl+P`) | Fixa ou desafixa o item selecionado no topo da lista |

@@ -24,21 +24,52 @@ use crate::storage::Storage;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+pub const PREVIEW_IMAGE_PATH: &str = "/tmp/clipvault-preview.png";
 
-/// Determina se o terminal suporta protocolo Kitty quando a detecção automática cai em Halfblocks.
-pub fn should_use_kitty_protocol(
+/// Resolve o protocolo gráfico quando `guess_protocol()` cai no fallback `Halfblocks`:
+/// - `ProtocolType::Sixel` no COSMIC Terminal (`TERM_PROGRAM` contendo `cosmic` ou `COSMIC_VERSION` definido);
+/// - `ProtocolType::Kitty` em `kitty`, `ghostty` ou `wezterm`.
+pub fn resolve_protocol_type(
     guessed: ProtocolType,
     term_program: Option<&str>,
     term: Option<&str>,
-) -> bool {
+    cosmic_version: Option<&str>,
+) -> ProtocolType {
     if guessed != ProtocolType::Halfblocks {
-        return false;
+        return guessed;
+    }
+    let is_cosmic = term_program
+        .is_some_and(|val| val.to_ascii_lowercase().contains("cosmic"))
+        || cosmic_version.is_some();
+    if is_cosmic {
+        return ProtocolType::Sixel;
     }
     let matches_kitty_term = |val: &str| {
         let lower = val.to_ascii_lowercase();
         lower.contains("kitty") || lower.contains("ghostty") || lower.contains("wezterm")
     };
-    term_program.is_some_and(matches_kitty_term) || term.is_some_and(matches_kitty_term)
+    if term_program.is_some_and(matches_kitty_term) || term.is_some_and(matches_kitty_term) {
+        return ProtocolType::Kitty;
+    }
+    ProtocolType::Halfblocks
+}
+
+#[cfg(not(test))]
+fn spawn_external_viewer(path: &str) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+
+    Command::new("xdg-open")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(test)]
+fn spawn_external_viewer(_path: &str) -> io::Result<()> {
+    Ok(())
 }
 
 /// Estado completo da interface interativa de terminal.
@@ -79,10 +110,14 @@ impl App {
         let guessed = picker.guess_protocol();
         let term_program = std::env::var("TERM_PROGRAM").ok();
         let term = std::env::var("TERM").ok();
+        let cosmic_version = std::env::var("COSMIC_VERSION").ok();
 
-        if should_use_kitty_protocol(guessed, term_program.as_deref(), term.as_deref()) {
-            picker.protocol_type = ProtocolType::Kitty;
-        }
+        picker.protocol_type = resolve_protocol_type(
+            guessed,
+            term_program.as_deref(),
+            term.as_deref(),
+            cosmic_version.as_deref(),
+        );
 
         self.picker = picker;
     }
@@ -228,6 +263,38 @@ impl App {
         });
     }
 
+    pub fn open_selected_image_external(&mut self) -> Result<()> {
+        let Some(entry) = self.selected_entry() else {
+            return Ok(());
+        };
+        if entry.kind != ContentKind::Image {
+            self.status_message = Some(
+                "Visualização externa ('v') disponível apenas para imagens [IMG].".to_string(),
+            );
+            return Ok(());
+        }
+        let blob = entry
+            .image_blob
+            .as_deref()
+            .context("registro de imagem não possui dados PNG armazenados")?;
+        std::fs::write(PREVIEW_IMAGE_PATH, blob)
+            .with_context(|| format!("falha ao salvar imagem em {PREVIEW_IMAGE_PATH}"))?;
+
+        match spawn_external_viewer(PREVIEW_IMAGE_PATH) {
+            Ok(()) => {
+                self.status_message = Some(format!(
+                    "Abrindo imagem em {PREVIEW_IMAGE_PATH} no visualizador padrão..."
+                ));
+            }
+            Err(err) => {
+                self.status_message = Some(format!(
+                    "PNG salvo em {PREVIEW_IMAGE_PATH} (falha ao iniciar xdg-open: {err})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn restore_selected_to_clipboard(&mut self) -> Result<()> {
         let Some(entry) = self.selected_entry().cloned() else {
             self.should_quit = true;
@@ -302,6 +369,9 @@ impl App {
             }
             KeyCode::Char('s') if ctrl || !self.search_focused => {
                 self.toggle_reveal_secret();
+            }
+            KeyCode::Char('v') if ctrl || !self.search_focused => {
+                self.open_selected_image_external()?;
             }
             KeyCode::Char('j') if !self.search_focused && !ctrl => {
                 self.select_next();
@@ -603,7 +673,7 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
 
     // 3. Barra de atalhos / status no rodapé
     let shortcuts =
-        "Enter: Copiar e Sair | p: Fixar | d: Deletar | s: Revelar/Ocultar Segredo | /: Buscar | Esc: Limpar/Sair";
+        "Enter: Copiar e Sair | v: Visualizar IMG | p: Fixar | d: Deletar | s: Segredo | /: Buscar | Esc: Limpar/Sair";
     let footer_line = if let Some(msg) = &app.status_message {
         Line::from(vec![
             Span::styled(format!("{msg}  |  "), Style::default().fg(Color::Green)),
@@ -706,7 +776,7 @@ mod tests {
         let png = crate::watcher::encode_rgba_to_png(4, 4, &[200; 64]).expect("png");
         let now = Utc::now().timestamp();
         let entry = storage
-            .insert_or_update_image(png, 4, 4, now)
+            .insert_or_update_image(png.clone(), 4, 4, now)
             .expect("insert image")
             .expect("entry");
 
@@ -723,39 +793,67 @@ mod tests {
             .image_preview_state
             .as_ref()
             .is_some_and(|(id, _)| *id == entry.id));
+
+        app.handle_key_event(key(KeyCode::Char('v')))
+            .expect("open external viewer");
+        let saved = std::fs::read(PREVIEW_IMAGE_PATH).expect("read preview png");
+        assert_eq!(saved, png);
     }
 
     #[test]
-    fn kitty_protocol_fallback_detects_modern_terminals() {
-        assert!(!should_use_kitty_protocol(
-            ProtocolType::Halfblocks,
-            Some("cosmic-term"),
-            Some("xterm-256color"),
-        ));
-        assert!(should_use_kitty_protocol(
-            ProtocolType::Halfblocks,
-            None,
-            Some("xterm-kitty"),
-        ));
-        assert!(should_use_kitty_protocol(
-            ProtocolType::Halfblocks,
-            Some("ghostty"),
-            None,
-        ));
-        assert!(should_use_kitty_protocol(
-            ProtocolType::Halfblocks,
-            Some("WezTerm"),
-            Some("xterm-256color"),
-        ));
-        assert!(!should_use_kitty_protocol(
-            ProtocolType::Halfblocks,
-            Some("gnome-terminal"),
-            Some("xterm-256color"),
-        ));
-        assert!(!should_use_kitty_protocol(
-            ProtocolType::Sixel,
-            Some("kitty"),
-            None,
-        ));
+    fn resolve_protocol_type_enables_sixel_for_cosmic_and_kitty_for_modern_terminals() {
+        assert_eq!(
+            resolve_protocol_type(
+                ProtocolType::Halfblocks,
+                Some("cosmic-term"),
+                Some("xterm-256color"),
+                None,
+            ),
+            ProtocolType::Sixel
+        );
+        assert_eq!(
+            resolve_protocol_type(
+                ProtocolType::Halfblocks,
+                None,
+                Some("xterm-256color"),
+                Some("1.0.0"),
+            ),
+            ProtocolType::Sixel
+        );
+        assert_eq!(
+            resolve_protocol_type(
+                ProtocolType::Halfblocks,
+                None,
+                Some("xterm-kitty"),
+                None,
+            ),
+            ProtocolType::Kitty
+        );
+        assert_eq!(
+            resolve_protocol_type(ProtocolType::Halfblocks, Some("ghostty"), None, None),
+            ProtocolType::Kitty
+        );
+        assert_eq!(
+            resolve_protocol_type(
+                ProtocolType::Halfblocks,
+                Some("WezTerm"),
+                Some("xterm-256color"),
+                None,
+            ),
+            ProtocolType::Kitty
+        );
+        assert_eq!(
+            resolve_protocol_type(
+                ProtocolType::Halfblocks,
+                Some("gnome-terminal"),
+                Some("xterm-256color"),
+                None,
+            ),
+            ProtocolType::Halfblocks
+        );
+        assert_eq!(
+            resolve_protocol_type(ProtocolType::Sixel, Some("kitty"), None, None),
+            ProtocolType::Sixel
+        );
     }
 }
