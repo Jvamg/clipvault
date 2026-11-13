@@ -4,10 +4,10 @@ use regex::Regex;
 
 use crate::domain::{ClipEntry, ContentKind};
 
-/// Tempo de vida automático (5 minutos) para tokens e segredos sensíveis.
+/// Automatic time-to-live (5 minutes) for sensitive tokens and secrets.
 pub const SECRET_TTL_SECONDS: i64 = 300;
 
-/// Resultado da classificação heurística de um conteúdo copiado.
+/// Output of the heuristic classifier for copied text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Classification {
     pub kind: ContentKind,
@@ -28,9 +28,9 @@ fn patterns() -> &'static ClassifierPatterns {
     static PATTERNS: OnceLock<ClassifierPatterns> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         let secret_patterns = vec![
-            // Chaves OpenAI / Stripe / Anthropic (sk-...)
+            // OpenAI / Stripe / Anthropic keys (sk-...)
             Regex::new(r"\bsk-[A-Za-z0-9_\-]{16,}\b").expect("valid sk regex"),
-            // Tokens GitHub clássicos e fine-grained
+            // Classic and fine-grained GitHub tokens
             Regex::new(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}\b")
                 .expect("valid github token regex"),
             Regex::new(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b").expect("valid github pat regex"),
@@ -46,10 +46,10 @@ fn patterns() -> &'static ClassifierPatterns {
             // JSON Web Tokens (JWT)
             Regex::new(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
                 .expect("valid jwt regex"),
-            // Chaves privadas PEM / OpenSSH
+            // PEM / OpenSSH private keys
             Regex::new(r"-----BEGIN (?:RSA |OPENSSH |EC |DSA |PGP )?PRIVATE KEY-----")
                 .expect("valid private key regex"),
-            // Senhas ou chaves explícitas em atribuições (env, config, JSON)
+            // Explicit passwords or keys in assignments (env, config, JSON)
             Regex::new(
                 r#"(?i)(?:^|[\s"'_,.;({])(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)['"]?\s*[:=]\s*['"]?[^\s'",}]{6,}['"]?"#,
             )
@@ -94,12 +94,12 @@ fn patterns() -> &'static ClassifierPatterns {
     })
 }
 
-/// Classifica o texto copiado aplicando as regras heurísticas e de segurança.
+/// Classifies copied text by applying heuristic and security rules.
 pub fn classify(input: &str) -> Classification {
     let trimmed = input.trim();
     let p = patterns();
 
-    // Prioridade 1: Segurança (tokens, chaves privadas, senhas explícitas)
+    // Priority 1: Security (tokens, private keys, explicit passwords)
     if p.secret_patterns.iter().any(|re| re.is_match(input)) {
         return Classification {
             kind: ContentKind::SecretToken,
@@ -108,7 +108,7 @@ pub fn classify(input: &str) -> Classification {
         };
     }
 
-    // Prioridade 2: JSON válido (objeto ou array) com formatação automática
+    // Priority 2: Valid JSON (object or array) with automatic pretty-printing
     if (trimmed.starts_with('{') && trimmed.ends_with('}'))
         || (trimmed.starts_with('[') && trimmed.ends_with(']'))
     {
@@ -121,7 +121,7 @@ pub fn classify(input: &str) -> Classification {
         }
     }
 
-    // Prioridade 3: URL em linha única
+    // Priority 3: Single-line URL
     if !trimmed.is_empty()
         && !trimmed.chars().any(char::is_whitespace)
         && p.url_regex.is_match(trimmed)
@@ -133,7 +133,7 @@ pub fn classify(input: &str) -> Classification {
         };
     }
 
-    // Prioridade 4: ShellCommand vs CodeSnippet
+    // Priority 4: ShellCommand vs CodeSnippet
     let first_non_empty_line = trimmed
         .lines()
         .map(str::trim)
@@ -174,7 +174,7 @@ pub fn classify(input: &str) -> Classification {
         };
     }
 
-    // Fallback: texto simples
+    // Fallback: plain text
     Classification {
         kind: ContentKind::PlainText,
         pretty_json: None,
@@ -182,7 +182,7 @@ pub fn classify(input: &str) -> Classification {
     }
 }
 
-/// Constrói um `ClipEntry` completo já classificado para o timestamp informado.
+/// Builds a complete classified `ClipEntry` for the given timestamp.
 pub fn build_entry(id: u64, content: &str, now_ts: i64) -> ClipEntry {
     let classification = classify(content);
     let expires_at = classification.ttl_seconds.map(|ttl| now_ts + ttl);
@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn classifies_plain_text() {
-        let res = classify("Reunião às 15h para revisar a arquitetura do clipvault.");
+        let res = classify("Meeting at 3pm to review the clipvault architecture.");
         assert_eq!(res.kind, ContentKind::PlainText);
         assert_eq!(res.ttl_seconds, None);
         assert_eq!(res.pretty_json, None);
@@ -288,7 +288,7 @@ mod tests {
             );
             assert_eq!(entry.expires_at, Some(now + SECRET_TTL_SECONDS));
             assert_eq!(entry.expires_at, Some(now + 300));
-            assert!(entry.display_preview(false).contains("OCULTOS"));
+            assert!(entry.display_preview(false).contains("HIDDEN"));
             assert!(!entry.display_preview(false).contains(secret));
             assert_eq!(entry.display_preview(true), *secret);
         }

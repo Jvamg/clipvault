@@ -14,30 +14,30 @@ use crate::domain::{ClipEntry, ContentKind};
 const META_LAST_RESTORED_HASH_KEY: &str = "last_restored_hash";
 const ENTRY_SELECT_COLS: &str = "id, content, pretty_json, kind, created_at, updated_at, content_hash, use_count, pinned, expires_at, image_blob, image_width, image_height";
 
-/// Camada de persistência local embutida sobre SQLite (`rusqlite`) em modo WAL.
+/// Embedded local persistence layer backed by SQLite (`rusqlite`) in WAL mode.
 pub struct Storage {
     conn: Mutex<Connection>,
 }
 
 impl Storage {
-    /// Abre ou cria o banco SQLite no caminho especificado configurando WAL,
-    /// sincronização e timeout para acesso concorrente entre `daemon` e `ui`.
+    /// Opens or creates the SQLite database at the specified path, configuring WAL,
+    /// synchronization, and busy timeout for concurrent access between `daemon` and `ui`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path_ref = path.as_ref();
         if let Some(parent) = path_ref.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent).with_context(|| {
-                    format!("falha ao criar diretório do banco: {}", parent.display())
+                    format!("failed to create database directory: {}", parent.display())
                 })?;
             }
         }
 
         let conn = Connection::open(path_ref)
-            .with_context(|| format!("falha ao abrir banco sqlite: {}", path_ref.display()))?;
+            .with_context(|| format!("failed to open sqlite database: {}", path_ref.display()))?;
 
-        // Garante timeout antes de executar PRAGMAs e criação de schema sob concorrência.
+        // Ensure busy_timeout is set before running PRAGMAs and schema setup under concurrency.
         conn.busy_timeout(Duration::from_millis(5000))
-            .context("falha ao configurar busy_timeout no SQLite")?;
+            .context("failed to configure SQLite busy_timeout")?;
 
         conn.execute_batch(
             "
@@ -77,7 +77,7 @@ impl Storage {
             );
             ",
         )
-        .context("falha ao inicializar PRAGMAs e schema SQLite")?;
+        .context("failed to initialize SQLite PRAGMAs and schema")?;
 
         ensure_image_columns(&conn)?;
         Self::purge_legacy_binary_entries(&conn)?;
@@ -87,7 +87,7 @@ impl Storage {
         })
     }
 
-    /// Caminho padrão do banco local (`~/.local/share/clipvault/clipvault.db`).
+    /// Default local database path (`~/.local/share/clipvault/clipvault.db`).
     pub fn default_db_path() -> PathBuf {
         dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -95,7 +95,7 @@ impl Storage {
             .join("clipvault.db")
     }
 
-    /// Remove registros legados não-imagem cujo texto contém bytes NUL ou assinatura binária PNG.
+    /// Removes legacy non-image rows whose text contains NUL bytes or a PNG binary signature.
     fn purge_legacy_binary_entries(conn: &Connection) -> Result<()> {
         conn.execute(
             "DELETE FROM entries
@@ -107,12 +107,12 @@ impl Storage {
                )",
             [],
         )
-        .context("falha ao limpar registros binários legados")?;
+        .context("failed to clean legacy binary entries")?;
         Ok(())
     }
 
-    /// Insere um novo item ou deduplica pelo SHA-256 se já existir.
-    /// Também remove automaticamente itens expirados antes da gravação.
+    /// Inserts a new text entry or deduplicates by SHA-256 if it already exists.
+    /// Also automatically removes expired entries before writing.
     pub fn insert_or_update(&self, content: &str, now_ts: i64) -> Result<Option<ClipEntry>> {
         if content.trim().is_empty()
             || content.contains('\0')
@@ -185,7 +185,7 @@ impl Storage {
         Ok(Some(saved_entry))
     }
 
-    /// Insere uma nova imagem PNG ou deduplica pelo hash SHA-256 dos bytes da imagem.
+    /// Inserts a new PNG image or deduplicates by SHA-256 hash of its image bytes.
     pub fn insert_or_update_image(
         &self,
         png_bytes: Vec<u8>,
@@ -253,7 +253,7 @@ impl Storage {
         Ok(Some(saved_entry))
     }
 
-    /// Busca uma entrada específica pelo ID.
+    /// Fetches a specific entry by ID.
     #[allow(dead_code)]
     pub fn get(&self, id: u64) -> Result<Option<ClipEntry>> {
         let conn = self.lock_conn()?;
@@ -267,12 +267,12 @@ impl Storage {
         Ok(entry)
     }
 
-    /// Lista todos os itens válidos ordenados por fixados no topo, depois mais recentes.
+    /// Lists all active entries ordered by pinned first, then most recently updated.
     pub fn list_all(&self, now_ts: i64) -> Result<Vec<ClipEntry>> {
         self.load_active_entries(now_ts)
     }
 
-    /// Alterna o estado `pinned` de um item existente.
+    /// Toggles the `pinned` flag of an existing entry.
     pub fn toggle_pin(&self, id: u64) -> Result<Option<ClipEntry>> {
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -300,15 +300,15 @@ impl Storage {
         Ok(updated)
     }
 
-    /// Remove um item pelo ID. Retorna `true` se o item existia.
+    /// Deletes an entry by ID. Returns `true` if a row was removed.
     pub fn delete(&self, id: u64) -> Result<bool> {
         let conn = self.lock_conn()?;
         let removed = conn.execute("DELETE FROM entries WHERE id = ?1", params![id as i64])?;
         Ok(removed > 0)
     }
 
-    /// Registra que o usuário restaurou este item para o clipboard do sistema,
-    /// salvando seu hash na tabela meta para o watcher ignorar o evento de eco.
+    /// Records that the user restored this entry to the system clipboard,
+    /// storing its hash in the `meta` table so the watcher ignores the echo event.
     pub fn record_restore(&self, id: u64, now_ts: i64) -> Result<Option<ClipEntry>> {
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -347,7 +347,7 @@ impl Storage {
         Ok(updated)
     }
 
-    /// Lê e consome o último hash restaurado pela TUI para evitar loop no watcher.
+    /// Reads and consumes the last hash restored by the TUI to avoid echo loops in the watcher.
     pub fn consume_last_restored_hash(&self) -> Result<Option<String>> {
         let mut conn = self.lock_conn()?;
 
@@ -382,7 +382,7 @@ impl Storage {
         Ok(value)
     }
 
-    /// Remove todas as entradas cujo TTL já expirou em `now_ts`.
+    /// Removes all entries whose TTL has already expired at `now_ts`.
     pub fn purge_expired(&self, now_ts: i64) -> Result<usize> {
         let conn = self.lock_conn()?;
         let removed = conn.execute(
@@ -392,7 +392,7 @@ impl Storage {
         Ok(removed)
     }
 
-    /// Executa busca fuzzy nos itens ativos ordenando por maior pontuação de relevância.
+    /// Performs fuzzy search over active entries ordered by relevance score.
     pub fn search(&self, query: &str, now_ts: i64) -> Result<Vec<ClipEntry>> {
         let trimmed = query.trim();
         let active = self.load_active_entries(now_ts)?;
@@ -456,7 +456,7 @@ impl Storage {
     fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
-            .map_err(|_| anyhow::anyhow!("mutex da conexão SQLite envenenado"))
+            .map_err(|_| anyhow::anyhow!("SQLite connection mutex poisoned"))
     }
 }
 
@@ -503,7 +503,7 @@ fn kind_from_str(raw: &str) -> std::result::Result<ContentKind, rusqlite::Error>
         other => Err(rusqlite::Error::FromSqlConversionFailure(
             3,
             Type::Text,
-            format!("ContentKind inválido no banco: {other}").into(),
+            format!("invalid ContentKind in database: {other}").into(),
         )),
     }
 }
@@ -590,7 +590,7 @@ mod tests {
             .expect("first insert")
             .expect("entry");
         let other = storage
-            .insert_or_update("nota qualquer", 110)
+            .insert_or_update("random note", 110)
             .expect("other insert")
             .expect("entry");
         let dup = storage
@@ -619,18 +619,18 @@ mod tests {
             .expect("insert secret")
             .expect("entry");
         let normal = storage
-            .insert_or_update("texto comum seguro", now)
+            .insert_or_update("regular safe plain text", now)
             .expect("insert text")
             .expect("entry");
 
         assert_eq!(secret.kind, ContentKind::SecretToken);
         assert_eq!(secret.expires_at, Some(now + 300));
 
-        // Ainda válido aos 299s
+        // Still active at 299s
         let active_before = storage.list_all(now + 299).expect("list before expiry");
         assert_eq!(active_before.len(), 2);
 
-        // Expirado aos 300s -> removido automaticamente
+        // Expired at 300s -> automatically purged
         let active_after = storage.list_all(now + 300).expect("list after expiry");
         assert_eq!(active_after.len(), 1);
         assert_eq!(active_after[0].id, normal.id);
@@ -642,11 +642,11 @@ mod tests {
         let (_dir, storage) = test_storage();
 
         let older = storage
-            .insert_or_update("item antigo fixado", 100)
+            .insert_or_update("older pinned item", 100)
             .expect("insert")
             .expect("entry");
         let newer = storage
-            .insert_or_update("item recente normal", 200)
+            .insert_or_update("newer regular item", 200)
             .expect("insert")
             .expect("entry");
 
@@ -683,10 +683,10 @@ mod tests {
         let (_dir, storage) = test_storage();
 
         storage
-            .insert_or_update("configuracao geral de rede", 100)
+            .insert_or_update("general network settings", 100)
             .expect("insert");
         storage
-            .insert_or_update("c l i p _ v a u l t _ outro", 200)
+            .insert_or_update("c l i p _ v a u l t _ other", 200)
             .expect("insert");
         let exact = storage
             .insert_or_update("clipvault daemon --db local.db", 150)
@@ -784,10 +784,10 @@ mod tests {
         assert_eq!(first.image_dimensions, Some((1920, 1080)));
         assert_eq!(first.image_blob.as_deref(), Some(png_bytes.as_slice()));
         assert_eq!(first.content_hash, expected_hash);
-        assert_eq!(first.content, "Imagem PNG (1920x1080, 1 KB)");
+        assert_eq!(first.content, "PNG Image (1920x1080, 1 KB)");
         assert_eq!(first.use_count, 1);
 
-        // Mesmos bytes devem deduplicar sem criar segundo registro
+        // Identical bytes should deduplicate without creating a second row
         let dup = storage
             .insert_or_update_image(png_bytes.clone(), 1920, 1080, 1_200)
             .expect("dup image")
@@ -836,7 +836,7 @@ mod tests {
                     content, pretty_json, kind, created_at, updated_at,
                     content_hash, use_count, pinned, expires_at
                 ) VALUES (
-                    'historico antigo preservado', NULL, 'PlainText',
+                    'preserved legacy history', NULL, 'PlainText',
                     100, 100, 'legacyhash123', 1, 0, NULL
                 );
                 ",
@@ -874,12 +874,12 @@ mod tests {
         let storage = Storage::open(&db_path).expect("migrate legacy db");
         let existing = storage.list_all(200).expect("list migrated");
         assert_eq!(existing.len(), 1);
-        assert_eq!(existing[0].content, "historico antigo preservado");
+        assert_eq!(existing[0].content, "preserved legacy history");
         assert!(existing[0].image_blob.is_none());
         assert!(existing[0].image_dimensions.is_none());
 
         assert!(storage
-            .insert_or_update("texto\0binario", 210)
+            .insert_or_update("binary\0text", 210)
             .expect("reject nul text")
             .is_none());
         assert!(storage

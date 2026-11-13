@@ -26,9 +26,9 @@ const TICK_RATE: Duration = Duration::from_millis(250);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 pub const PREVIEW_IMAGE_PATH: &str = "/tmp/clipvault-preview.png";
 
-/// Resolve o protocolo gráfico quando `guess_protocol()` cai no fallback `Halfblocks`:
-/// - `ProtocolType::Sixel` no COSMIC Terminal (`TERM_PROGRAM` contendo `cosmic` ou `COSMIC_VERSION` definido);
-/// - `ProtocolType::Kitty` em `kitty`, `ghostty` ou `wezterm`.
+/// Resolves the graphics protocol when `guess_protocol()` falls back to `Halfblocks`:
+/// - `ProtocolType::Sixel` on COSMIC Terminal (`TERM_PROGRAM` contains `cosmic` or `COSMIC_VERSION` is set);
+/// - `ProtocolType::Kitty` on `kitty`, `ghostty`, or `wezterm`.
 pub fn resolve_protocol_type(
     guessed: ProtocolType,
     term_program: Option<&str>,
@@ -72,7 +72,7 @@ fn spawn_external_viewer(_path: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Estado completo da interface interativa de terminal.
+/// Complete state of the interactive terminal interface.
 pub struct App {
     pub storage: Arc<Storage>,
     pub query: String,
@@ -104,7 +104,7 @@ impl App {
         Ok(app)
     }
 
-    /// Detecta o protocolo gráfico do terminal (Kitty/Sixel/Halfblocks) após entrar na tela alternativa.
+    /// Detects the terminal graphics protocol (Kitty/Sixel/Halfblocks) after entering the alternate screen.
     pub fn init_terminal_picker(&mut self) {
         let mut picker = Picker::from_termios().unwrap_or_else(|_| Picker::new((9, 18)));
         let guessed = picker.guess_protocol();
@@ -122,7 +122,7 @@ impl App {
         self.picker = picker;
     }
 
-    /// Garante que o protocolo de renderização da imagem selecionada esteja pronto para o painel.
+    /// Ensures the rendering protocol state is ready for the currently selected image entry.
     pub fn ensure_image_protocol(&mut self) {
         let Some(entry) = self.selected_entry() else {
             self.image_preview_state = None;
@@ -226,9 +226,9 @@ impl App {
         };
         if let Some(updated) = self.storage.toggle_pin(entry.id)? {
             self.status_message = Some(if updated.pinned {
-                format!("Item #{} fixado no topo.", updated.id)
+                format!("Item #{} pinned to top.", updated.id)
             } else {
-                format!("Item #{} desafixado.", updated.id)
+                format!("Item #{} unpinned.", updated.id)
             });
             self.refresh_entries(Some(updated.id))?;
         }
@@ -242,7 +242,7 @@ impl App {
         let current_idx = self.list_state.selected();
         if self.storage.delete(entry.id)? {
             self.reveal_secret = false;
-            self.status_message = Some(format!("Item #{} removido do histórico.", entry.id));
+            self.status_message = Some(format!("Item #{} removed from history.", entry.id));
             self.refresh_entries(None)?;
             if !self.entries.is_empty() {
                 if let Some(idx) = current_idx {
@@ -257,9 +257,9 @@ impl App {
     pub fn toggle_reveal_secret(&mut self) {
         self.reveal_secret = !self.reveal_secret;
         self.status_message = Some(if self.reveal_secret {
-            "Preview de segredo revelado.".to_string()
+            "Secret preview revealed.".to_string()
         } else {
-            "Preview de segredo ocultado.".to_string()
+            "Secret preview hidden.".to_string()
         });
     }
 
@@ -269,26 +269,26 @@ impl App {
         };
         if entry.kind != ContentKind::Image {
             self.status_message = Some(
-                "Visualização externa ('v') disponível apenas para imagens [IMG].".to_string(),
+                "External viewer ('v') is only available for [IMG] entries.".to_string(),
             );
             return Ok(());
         }
         let blob = entry
             .image_blob
             .as_deref()
-            .context("registro de imagem não possui dados PNG armazenados")?;
+            .context("image entry has no stored PNG data")?;
         std::fs::write(PREVIEW_IMAGE_PATH, blob)
-            .with_context(|| format!("falha ao salvar imagem em {PREVIEW_IMAGE_PATH}"))?;
+            .with_context(|| format!("failed to save image to {PREVIEW_IMAGE_PATH}"))?;
 
         match spawn_external_viewer(PREVIEW_IMAGE_PATH) {
             Ok(()) => {
                 self.status_message = Some(format!(
-                    "Abrindo imagem em {PREVIEW_IMAGE_PATH} no visualizador padrão..."
+                    "Opening image at {PREVIEW_IMAGE_PATH} in default viewer..."
                 ));
             }
             Err(err) => {
                 self.status_message = Some(format!(
-                    "PNG salvo em {PREVIEW_IMAGE_PATH} (falha ao iniciar xdg-open: {err})"
+                    "PNG saved to {PREVIEW_IMAGE_PATH} (failed to launch xdg-open: {err})"
                 ));
             }
         }
@@ -303,24 +303,25 @@ impl App {
 
         let now_ts = Utc::now().timestamp();
         if entry.is_expired(now_ts) {
-            self.status_message = Some("Este segredo já expirou e foi removido.".to_string());
+            self.status_message =
+                Some("This secret has already expired and was removed.".to_string());
             self.refresh_entries(None)?;
             return Ok(());
         }
 
-        // Registra o hash antes de copiar para que o daemon em execução ignore o eco.
+        // Record the hash before copying so the running daemon ignores the self-triggered echo.
         let _ = self.storage.record_restore(entry.id, now_ts)?;
 
         if entry.kind == ContentKind::Image {
             let blob = entry
                 .image_blob
                 .as_deref()
-                .context("registro de imagem não possui dados PNG armazenados")?;
+                .context("image entry has no stored PNG data")?;
             crate::watcher::set_clipboard_image(blob)
-                .context("falha ao copiar imagem selecionada para o clipboard")?;
+                .context("failed to copy selected image to clipboard")?;
         } else {
             crate::watcher::set_clipboard_text(&entry.content)
-                .context("falha ao copiar item selecionado para o clipboard")?;
+                .context("failed to copy selected entry to clipboard")?;
         }
 
         self.should_quit = true;
@@ -403,12 +404,12 @@ struct TerminalGuard {
 
 impl TerminalGuard {
     fn init() -> Result<Self> {
-        enable_raw_mode().context("falha ao habilitar raw mode no terminal")?;
+        enable_raw_mode().context("failed to enable terminal raw mode")?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)
-            .context("falha ao entrar na tela alternativa do terminal")?;
+            .context("failed to enter terminal alternate screen")?;
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend).context("falha ao inicializar ratatui")?;
+        let terminal = Terminal::new(backend).context("failed to initialize ratatui")?;
         Ok(Self { terminal })
     }
 }
@@ -421,7 +422,7 @@ impl Drop for TerminalGuard {
     }
 }
 
-/// Inicia o loop principal da interface TUI.
+/// Starts the main interactive TUI event loop.
 pub fn run(storage: Arc<Storage>) -> Result<()> {
     let mut app = App::new(storage)?;
     let mut guard = TerminalGuard::init()?;
@@ -471,25 +472,25 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
         ])
         .split(frame.area());
 
-    // 1. Barra de busca fuzzy no topo
+    // 1. Top fuzzy search bar
     let search_border_style = if app.search_focused {
         Style::default().fg(Color::Cyan)
     } else {
         Style::default().fg(Color::DarkGray)
     };
     let search_mode_hint = if app.search_focused {
-        "DIGITANDO (Tab/Esc p/ sair)"
+        "TYPING (Tab/Esc to exit)"
     } else {
-        "NAVEGAÇÃO (pressione '/' ou Tab p/ buscar)"
+        "NAVIGATION (press '/' or Tab to search)"
     };
     let search_title = format!(
-        " ClipVault Time-Machine | Busca Fuzzy ({} itens) [{}] ",
+        " ClipVault Time-Machine | Fuzzy Search ({} items) [{}] ",
         app.entries.len(),
         search_mode_hint
     );
     let search_text = if app.query.is_empty() && !app.search_focused {
         Span::styled(
-            "Pressione '/' para filtrar o histórico...",
+            "Press '/' to filter history...",
             Style::default().fg(Color::DarkGray),
         )
     } else {
@@ -503,7 +504,7 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
     );
     frame.render_widget(search_bar, vertical[0]);
 
-    // 2. Painel central dividido em lista (esquerda) e preview (direita)
+    // 2. Split main pane: history list (left) and preview/metadata (right)
     let center = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
@@ -520,7 +521,7 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
                 Span::styled(pin_prefix, Style::default().fg(Color::Yellow)),
                 Span::styled(format!("{:<8}", entry.kind.tag()), kind_style(entry.kind)),
                 Span::raw(" "),
-                Span::styled(format!("{:<7}", rel_time), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<8}", rel_time), Style::default().fg(Color::DarkGray)),
                 Span::raw(" "),
                 Span::raw(summary),
             ]);
@@ -532,7 +533,7 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Histórico "),
+                .title(" History "),
         )
         .highlight_style(
             Style::default()
@@ -547,7 +548,7 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
         if entry.kind == ContentKind::Image {
             let outer_block = Block::default()
                 .borders(Borders::ALL)
-                .title(" Preview & Metadados ");
+                .title(" Preview & Metadata ");
             let inner_area = outer_block.inner(center[1]);
             frame.render_widget(outer_block, center[1]);
 
@@ -562,7 +563,7 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
             let formatted_date = DateTime::from_timestamp(entry.updated_at, 0)
                 .map(|dt| {
                     dt.with_timezone(&Local)
-                        .format("%d/%m/%Y %H:%M:%S")
+                        .format("%Y-%m-%d %H:%M:%S")
                         .to_string()
                 })
                 .unwrap_or_else(|| entry.updated_at.to_string());
@@ -577,15 +578,15 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
                     Span::styled(entry.kind.tag(), kind_style(entry.kind)),
                     Span::styled(
                         format!(
-                            " | {w}x{h} px | {kb} KB | Usos: {} | Fixado: {}",
+                            " | {w}x{h} px | {kb} KB | Uses: {} | Pinned: {}",
                             entry.use_count,
-                            if entry.pinned { "Sim" } else { "Não" },
+                            if entry.pinned { "Yes" } else { "No" },
                         ),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]),
                 Line::from(Span::styled(
-                    format!("Data: {formatted_date} | SHA: {short_hash}"),
+                    format!("Date: {formatted_date} | SHA: {short_hash}"),
                     Style::default().fg(Color::DarkGray),
                 )),
                 Line::from(Span::styled(
@@ -602,7 +603,7 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
                 frame.render_stateful_widget(image_widget, preview_chunks[1], proto);
             } else {
                 frame.render_widget(
-                    Paragraph::new("Não foi possível decodificar o preview da imagem.")
+                    Paragraph::new("Failed to decode image preview.")
                         .style(Style::default().fg(Color::Red)),
                     preview_chunks[1],
                 );
@@ -613,7 +614,7 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
             let ttl_info = match entry.expires_at {
                 Some(exp) => {
                     let rem = (exp - now_ts).max(0);
-                    format!(" | Expira em {}m{:02}s", rem / 60, rem % 60)
+                    format!(" | Expires in {}m{:02}s", rem / 60, rem % 60)
                 }
                 None => String::new(),
             };
@@ -626,9 +627,9 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
                 Span::styled(entry.kind.tag(), kind_style(entry.kind)),
                 Span::styled(
                     format!(
-                        " | Usos: {} | Fixado: {} | SHA: {}{}",
+                        " | Uses: {} | Pinned: {} | SHA: {}{}",
                         entry.use_count,
-                        if entry.pinned { "Sim" } else { "Não" },
+                        if entry.pinned { "Yes" } else { "No" },
                         short_hash,
                         ttl_info
                     ),
@@ -654,26 +655,26 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Preview & Metadados "),
+                        .title(" Preview & Metadata "),
                 )
                 .wrap(Wrap { trim: false });
             frame.render_widget(preview_widget, center[1]);
         }
     } else {
         app.image_preview_state = None;
-        let preview_widget = Paragraph::new("Nenhum item encontrado no histórico.")
+        let preview_widget = Paragraph::new("No items found in history.")
             .style(Style::default().fg(Color::DarkGray))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Preview & Metadados "),
+                    .title(" Preview & Metadata "),
             );
         frame.render_widget(preview_widget, center[1]);
     }
 
-    // 3. Barra de atalhos / status no rodapé
+    // 3. Bottom shortcuts / status bar
     let shortcuts =
-        "Enter: Copiar e Sair | v: Visualizar IMG | p: Fixar | d: Deletar | s: Segredo | /: Buscar | Esc: Limpar/Sair";
+        "Enter: Copy & Quit | v: View IMG | p: Pin | d: Delete | s: Secret | /: Search | Esc: Clear/Quit";
     let footer_line = if let Some(msg) = &app.status_message {
         Line::from(vec![
             Span::styled(format!("{msg}  |  "), Style::default().fg(Color::Green)),
@@ -684,7 +685,7 @@ fn draw_ui(frame: &mut Frame, app: &mut App) {
     };
 
     let footer = Paragraph::new(footer_line)
-        .block(Block::default().borders(Borders::ALL).title(" Atalhos "));
+        .block(Block::default().borders(Borders::ALL).title(" Shortcuts "));
     frame.render_widget(footer, vertical[2]);
 }
 
@@ -698,7 +699,7 @@ mod tests {
         let storage = Arc::new(Storage::open(dir.path().join("tui_test.db")).expect("open"));
         let now = Utc::now().timestamp();
         storage
-            .insert_or_update("primeiro item normal", now - 20)
+            .insert_or_update("first normal item", now - 20)
             .expect("insert 1");
         storage
             .insert_or_update("sk-secret1234567890abcdef12", now - 10)
@@ -720,7 +721,7 @@ mod tests {
         assert_eq!(app.entries.len(), 3);
         assert_eq!(app.selected_entry().expect("first").kind, ContentKind::Json);
 
-        // Navega para o SecretToken e revela
+        // Navigate to the SecretToken and reveal it
         app.handle_key_event(key(KeyCode::Down)).expect("down");
         assert_eq!(
             app.selected_entry().expect("second").kind,
@@ -729,17 +730,17 @@ mod tests {
         app.handle_key_event(key(KeyCode::Char('s'))).expect("reveal");
         assert!(app.reveal_secret);
 
-        // Ao trocar de item, `reveal_secret` deve voltar para false por segurança
+        // Moving to another entry resets `reveal_secret` back to false for safety
         app.handle_key_event(key(KeyCode::Down)).expect("down 2");
         assert!(!app.reveal_secret);
 
-        // Fixa o terceiro item e verifica que subiu para o topo
+        // Pin the third item and verify it moves to the top
         let third_id = app.selected_entry().expect("third").id;
         app.handle_key_event(key(KeyCode::Char('p'))).expect("pin");
         assert_eq!(app.entries[0].id, third_id);
         assert!(app.entries[0].pinned);
 
-        // Deleta o item selecionado e verifica que restam 2
+        // Delete the selected item and verify 2 items remain
         app.handle_key_event(key(KeyCode::Char('d'))).expect("delete");
         assert_eq!(app.entries.len(), 2);
     }
@@ -758,13 +759,13 @@ mod tests {
         assert_eq!(app.entries.len(), 1);
         assert_eq!(app.entries[0].kind, ContentKind::Json);
 
-        // Primeiro Esc limpa a busca sem fechar a TUI
+        // First Esc clears the search query without quitting the TUI
         app.handle_key_event(key(KeyCode::Esc)).expect("esc clear");
         assert!(app.query.is_empty());
         assert!(!app.should_quit);
         assert_eq!(app.entries.len(), 3);
 
-        // Segundo Esc encerra a TUI
+        // Second Esc quits the TUI
         app.handle_key_event(key(KeyCode::Esc)).expect("esc quit");
         assert!(app.should_quit);
     }

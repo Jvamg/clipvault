@@ -14,13 +14,13 @@ use image::{DynamicImage, ImageFormat, RgbaImage};
 use crate::domain::ClipEntry;
 use crate::storage::Storage;
 
-/// Intervalo padrão de polling do clipboard sem busy-waiting excessivo.
+/// Default clipboard polling interval without excessive busy-waiting.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Intervalo entre varreduras periódicas de limpeza de segredos expirados no daemon.
+/// Interval between periodic sweeps purging expired secrets in the daemon.
 pub const GC_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Conteúdo capturado do clipboard (texto ou imagem PNG comprimida).
+/// Captured clipboard content (plain text or PNG-compressed image).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardPayload {
     Text(String),
@@ -31,46 +31,46 @@ pub enum ClipboardPayload {
     },
 }
 
-/// Evento bruto capturado pelo watcher e enviado ao consumidor para persistência.
+/// Raw event captured by the watcher and sent to the consumer for persistence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClipboardEvent {
     pub payload: ClipboardPayload,
     pub timestamp: i64,
 }
 
-/// Codifica um buffer RGBA bruto em bytes PNG comprimidos.
+/// Encodes a raw RGBA pixel buffer into compressed PNG bytes.
 pub fn encode_rgba_to_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     let img_buf = RgbaImage::from_raw(width, height, rgba.to_vec())
-        .context("dimensões RGBA inválidas para codificação PNG")?;
+        .context("invalid RGBA dimensions for PNG encoding")?;
     let mut png_bytes = Vec::new();
     DynamicImage::ImageRgba8(img_buf)
         .write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
-        .context("falha ao codificar imagem RGBA para PNG")?;
+        .context("failed to encode RGBA image to PNG")?;
     Ok(png_bytes)
 }
 
-/// Lê as dimensões `(largura, altura)` de uma imagem em bytes (ex: PNG).
+/// Reads the `(width, height)` dimensions of an encoded image (e.g., PNG).
 pub fn decode_png_dimensions(png_bytes: &[u8]) -> Result<(u32, u32)> {
-    let img = image::load_from_memory(png_bytes)
-        .context("falha ao decodificar metadados da imagem PNG")?;
+    let img =
+        image::load_from_memory(png_bytes).context("failed to decode PNG image metadata")?;
     Ok((img.width(), img.height()))
 }
 
-/// Decodifica bytes PNG para `(largura, altura, pixels RGBA)`.
+/// Decodes PNG bytes into `(width, height, RGBA pixels)`.
 pub fn decode_png_to_rgba(png_bytes: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
-    let img = image::load_from_memory(png_bytes)
-        .context("falha ao decodificar imagem PNG para RGBA")?;
+    let img =
+        image::load_from_memory(png_bytes).context("failed to decode PNG image to RGBA")?;
     let width = img.width();
     let height = img.height();
     let rgba = img.to_rgba8().into_raw();
     Ok((width, height, rgba))
 }
 
-/// Decide se o conteúdo atual lido do clipboard deve ser ignorado pelo watcher.
+/// Decides whether the current clipboard content should be ignored by the watcher.
 ///
-/// Retorna `true` quando:
-/// - o hash coincide com `last_seen_hash` (sem alteração real desde o último poll); ou
-/// - o hash coincide com `ignored_hash` (alteração originada pelo próprio `clipvault` ao restaurar um item).
+/// Returns `true` when:
+/// - the hash matches `last_seen_hash` (no actual change since the last poll); or
+/// - the hash matches `ignored_hash` (change triggered by `clipvault` itself when restoring an item).
 pub fn should_ignore_clip(
     current_hash: &str,
     last_seen_hash: &mut Option<String>,
@@ -93,7 +93,7 @@ pub fn should_ignore_clip(
     false
 }
 
-/// Tenta ler texto do clipboard usando ferramentas CLI do sistema quando `arboard` falha ou retorna vazio.
+/// Attempts to read clipboard text using system CLI tools when `arboard` fails or returns empty.
 pub fn read_clipboard_fallback() -> Option<String> {
     const CANDIDATES: &[(&str, &[&str])] = &[
         ("xclip", &["-o", "-selection", "clipboard"]),
@@ -121,7 +121,7 @@ pub fn read_clipboard_fallback() -> Option<String> {
     None
 }
 
-/// Tenta ler uma imagem `image/png` do clipboard via Wayland (`wl-paste`) ou X11 (`xclip`).
+/// Attempts to read an `image/png` clipboard payload via Wayland (`wl-paste`) or X11 (`xclip`).
 pub fn read_clipboard_image_fallback() -> Option<(Vec<u8>, u32, u32)> {
     // 1. Wayland: wl-paste --list-types -> wl-paste --type image/png
     if let Ok(types_out) = Command::new("wl-paste")
@@ -232,7 +232,7 @@ fn read_arboard_payload(
                     });
                 }
                 Err(err) => {
-                    eprintln!("[clipvault-watcher] erro ao codificar imagem do clipboard: {err:#}");
+                    eprintln!("[clipvault-watcher] failed to encode clipboard image: {err:#}");
                 }
             }
         }
@@ -249,7 +249,7 @@ fn read_arboard_payload(
         Err(err) => {
             let msg = err.to_string();
             if last_arboard_err.as_deref() != Some(msg.as_str()) {
-                eprintln!("[clipvault-watcher] erro de leitura no arboard: {msg}");
+                eprintln!("[clipvault-watcher] arboard read error: {msg}");
                 *last_arboard_err = Some(msg);
             }
         }
@@ -258,7 +258,7 @@ fn read_arboard_payload(
     ArboardReadResult::EmptyOrError
 }
 
-/// Indica se a sessão atual está rodando sob Wayland.
+/// Returns true if the current session is running under Wayland.
 pub fn is_wayland_session() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
         || std::env::var("XDG_SESSION_TYPE")
@@ -266,9 +266,9 @@ pub fn is_wayland_session() -> bool {
             .unwrap_or(false)
 }
 
-/// Copia texto para o clipboard do sistema.
-/// No Wayland (ou quando utilitários CLI estão disponíveis), prioriza `wl-copy` / `xclip` / `xsel`,
-/// que fazem fork em segundo plano e mantêm o conteúdo vivo após o processo `clipvault ui` encerrar.
+/// Copies text to the system clipboard.
+/// On Wayland (or when CLI helpers are available), prioritizes `wl-copy` / `xclip` / `xsel`,
+/// which fork to the background and keep content alive after `clipvault ui` exits.
 pub fn set_clipboard_text(content: &str) -> Result<()> {
     let wayland_first: &[(&str, &[&str])] = &[
         ("wl-copy", &[]),
@@ -297,15 +297,15 @@ pub fn set_clipboard_text(content: &str) -> Result<()> {
         }
         Err(err) => {
             anyhow::bail!(
-                "falha ao copiar para o clipboard via CLI (wl-copy/xclip/xsel) e arboard ({err})"
+                "failed to copy to clipboard via CLI (wl-copy/xclip/xsel) and arboard ({err})"
             )
         }
     }
 }
 
-/// Restaura bytes PNG para o clipboard do sistema.
-/// Prioriza `wl-copy --type image/png` no Wayland (e `xclip` no X11) para que a imagem
-/// permaneça na área de transferência após o encerramento da TUI, com fallback para `arboard`.
+/// Restores PNG image bytes to the system clipboard.
+/// Prioritizes `wl-copy --type image/png` on Wayland (and `xclip` on X11) so the image
+/// persists after the TUI exits, falling back to `arboard`.
 pub fn set_clipboard_image(png_bytes: &[u8]) -> Result<()> {
     let wayland_first: &[(&str, &[&str])] = &[
         ("wl-copy", &["--type", "image/png"]),
@@ -338,7 +338,7 @@ pub fn set_clipboard_image(png_bytes: &[u8]) -> Result<()> {
     }
 
     anyhow::bail!(
-        "falha ao restaurar imagem no clipboard via CLI (wl-copy/xclip) e arboard"
+        "failed to restore image to clipboard via CLI (wl-copy/xclip) and arboard"
     )
 }
 
@@ -374,7 +374,7 @@ fn write_stdin_to_first_cli(writers: &[(&str, &[&str])], bytes: &[u8]) -> bool {
     false
 }
 
-/// Monitor de clipboard em segundo plano utilizando `arboard` (com fallback CLI) e canal `mpsc`.
+/// Background clipboard monitor using `arboard` (with CLI fallback) and an `mpsc` channel.
 pub struct ClipboardWatcher {
     storage: Arc<Storage>,
     ignored_hash: Arc<Mutex<Option<String>>>,
@@ -390,13 +390,13 @@ impl ClipboardWatcher {
         }
     }
 
-    /// Retorna um handle compartilhado para registrar hashes que devem ser ignorados.
+    /// Returns a shared handle for registering hashes that should be ignored.
     #[allow(dead_code)]
     pub fn ignored_handle(&self) -> Arc<Mutex<Option<String>>> {
         Arc::clone(&self.ignored_hash)
     }
 
-    /// Registra em memória um texto restaurado pelo próprio `clipvault` para evitar eco.
+    /// Records a restored text string in memory so its clipboard echo is ignored.
     #[allow(dead_code)]
     pub fn mark_ignored(&self, content: &str) {
         let hash = ClipEntry::compute_hash(content);
@@ -405,7 +405,7 @@ impl ClipboardWatcher {
         }
     }
 
-    /// Inicia a thread de monitoramento em segundo plano e retorna o receptor de eventos capturados.
+    /// Spawns the background watcher thread and returns the captured event receiver.
     pub fn spawn(
         self,
         stop_flag: Arc<AtomicBool>,
@@ -414,7 +414,7 @@ impl ClipboardWatcher {
         let handle = thread::Builder::new()
             .name("clipvault-watcher".to_string())
             .spawn(move || self.run_loop(tx, stop_flag))
-            .context("falha ao iniciar thread do watcher")?;
+            .context("failed to spawn watcher thread")?;
 
         Ok((rx, handle))
     }
@@ -424,12 +424,12 @@ impl ClipboardWatcher {
         tx: mpsc::Sender<ClipboardEvent>,
         stop_flag: Arc<AtomicBool>,
     ) -> Result<()> {
-        // Instancia uma única vez e mantém o objeto vivo durante toda a execução.
+        // Instantiate once and keep the handle alive for the entire watcher lifetime.
         let mut clipboard = match Clipboard::new() {
             Ok(cb) => Some(cb),
             Err(err) => {
                 eprintln!(
-                    "[clipvault-watcher] aviso: falha ao inicializar arboard ({err}); usando fallback CLI (wl-paste/xclip/xsel)."
+                    "[clipvault-watcher] warning: failed to initialize arboard ({err}); falling back to CLI (wl-paste/xclip/xsel)."
                 );
                 None
             }
@@ -441,7 +441,7 @@ impl ClipboardWatcher {
         let mut last_gc = Instant::now();
 
         if let Err(err) = self.storage.purge_expired(Utc::now().timestamp()) {
-            eprintln!("[clipvault-watcher] erro na limpeza inicial de expirados: {err:#}");
+            eprintln!("[clipvault-watcher] error during initial expired items cleanup: {err:#}");
         }
 
         while !stop_flag.load(Ordering::Relaxed) {
@@ -449,7 +449,7 @@ impl ClipboardWatcher {
 
             if last_gc.elapsed() >= GC_INTERVAL {
                 if let Err(err) = self.storage.purge_expired(now_ts) {
-                    eprintln!("[clipvault-watcher] erro no GC de expirados: {err:#}");
+                    eprintln!("[clipvault-watcher] error during expired items GC: {err:#}");
                 }
                 last_gc = Instant::now();
             }
@@ -463,7 +463,7 @@ impl ClipboardWatcher {
                 Ok(None) => {}
                 Err(err) => {
                     eprintln!(
-                        "[clipvault-watcher] erro ao ler hash restaurado no SQLite: {err:#}"
+                        "[clipvault-watcher] error reading restored hash from SQLite: {err:#}"
                     );
                 }
             }
@@ -535,32 +535,32 @@ mod tests {
     fn accepts_new_clip_and_ignores_unchanged_polls() {
         let mut last_seen = None;
         let mut ignored = None;
-        let h1 = ClipEntry::compute_hash("primeiro texto");
+        let h1 = ClipEntry::compute_hash("first text");
 
         assert!(!should_ignore_clip(&h1, &mut last_seen, &mut ignored));
         assert_eq!(last_seen.as_deref(), Some(h1.as_str()));
 
-        // Polls repetidos com o mesmo conteúdo devem ser ignorados
+        // Repeated polls with identical content should be ignored
         assert!(should_ignore_clip(&h1, &mut last_seen, &mut ignored));
         assert!(should_ignore_clip(&h1, &mut last_seen, &mut ignored));
     }
 
     #[test]
     fn suppresses_self_restored_clip_once_then_allows_future_manual_copies() {
-        let mut last_seen = Some(ClipEntry::compute_hash("texto atual"));
-        let h_restored = ClipEntry::compute_hash("item restaurado pelo clipvault");
+        let mut last_seen = Some(ClipEntry::compute_hash("current text"));
+        let h_restored = ClipEntry::compute_hash("item restored by clipvault");
         let mut ignored = Some(h_restored.clone());
 
-        // Eco da restauração deve ser ignorado e limpar `ignored`
+        // Restore echo should be ignored once and clear `ignored`
         assert!(should_ignore_clip(&h_restored, &mut last_seen, &mut ignored));
         assert!(ignored.is_none());
         assert_eq!(last_seen.as_deref(), Some(h_restored.as_str()));
 
-        // Usuário copia outro conteúdo
-        let h_other = ClipEntry::compute_hash("outro conteudo");
+        // User copies something else
+        let h_other = ClipEntry::compute_hash("other content");
         assert!(!should_ignore_clip(&h_other, &mut last_seen, &mut ignored));
 
-        // Usuário copia manualmente o mesmo item novamente -> agora deve ser capturado
+        // User manually copies the same entry again -> should now be captured
         assert!(!should_ignore_clip(
             &h_restored,
             &mut last_seen,
@@ -570,7 +570,7 @@ mod tests {
 
     #[test]
     fn restoring_already_active_clip_clears_ignored_hash() {
-        let h = ClipEntry::compute_hash("mesmo item");
+        let h = ClipEntry::compute_hash("same item");
         let mut last_seen = Some(h.clone());
         let mut ignored = Some(h.clone());
 
@@ -585,18 +585,18 @@ mod tests {
         let watcher = ClipboardWatcher::new(storage);
         let handle = watcher.ignored_handle();
 
-        watcher.mark_ignored("texto restaurado");
+        watcher.mark_ignored("restored text");
         let recorded = handle.lock().expect("lock").clone();
-        assert_eq!(recorded, Some(ClipEntry::compute_hash("texto restaurado")));
+        assert_eq!(recorded, Some(ClipEntry::compute_hash("restored text")));
     }
 
     #[test]
     fn png_roundtrip_encoding_and_decoding_preserve_dimensions_and_pixels() {
         let rgba: Vec<u8> = vec![
-            255, 0, 0, 255, // vermelho
-            0, 255, 0, 255, // verde
-            0, 0, 255, 255, // azul
-            255, 255, 255, 255, // branco
+            255, 0, 0, 255, // red
+            0, 255, 0, 255, // green
+            0, 0, 255, 255, // blue
+            255, 255, 255, 255, // white
         ];
         let png = encode_rgba_to_png(2, 2, &rgba).expect("encode png");
         assert!(png.starts_with(&[0x89, b'P', b'N', b'G']));

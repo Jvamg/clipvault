@@ -22,10 +22,10 @@ use crate::watcher::{ClipboardPayload, ClipboardWatcher, GC_INTERVAL};
 #[command(
     name = "clipvault",
     version,
-    about = "Gerenciador e Time-Machine inteligente de clipboard para Linux (Wayland/X11)"
+    about = "Smart clipboard manager and Time-Machine for Linux (Wayland/X11)"
 )]
 struct Cli {
-    /// Caminho alternativo para o arquivo do banco SQLite local (.db)
+    /// Custom path to the local SQLite database file (.db)
     #[arg(long, global = true, value_name = "PATH")]
     db: Option<PathBuf>,
 
@@ -35,9 +35,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Executa o monitor de clipboard e o coletor de segredos expirados em segundo plano
+    /// Run the background clipboard watcher and expired secrets garbage collector
     Daemon,
-    /// Abre a interface interativa de terminal (padrão quando nenhum subcomando é informado)
+    /// Open the interactive terminal interface (default when no subcommand is given)
     Ui,
 }
 
@@ -47,7 +47,7 @@ fn run_daemon(storage: Arc<Storage>) -> Result<()> {
     let (rx, handle) = watcher.spawn(Arc::clone(&stop_flag))?;
 
     println!(
-        "[clipvault-daemon] Monitorando clipboard a cada {}ms (TTL de segredos: {}s).",
+        "[clipvault-daemon] Watching clipboard every {}ms (secret TTL: {}s).",
         watcher::POLL_INTERVAL.as_millis(),
         classifier::SECRET_TTL_SECONDS
     );
@@ -77,13 +77,13 @@ fn run_daemon(storage: Arc<Storage>) -> Result<()> {
                             .map_or(entry.content.len(), Vec::len);
                         if entry.kind.is_secret() {
                             println!(
-                                "[clipvault-daemon] Capturado: {} ({bytes} bytes) [conteúdo sensível oculto, TTL: {}s]",
+                                "[clipvault-daemon] Captured: {} ({bytes} bytes) [sensitive content hidden, TTL: {}s]",
                                 entry.kind.tag(),
                                 classifier::SECRET_TTL_SECONDS
                             );
                         } else {
                             println!(
-                                "[clipvault-daemon] Capturado: {} ({bytes} bytes) — {}",
+                                "[clipvault-daemon] Captured: {} ({bytes} bytes) — {}",
                                 entry.kind.tag(),
                                 entry.single_line_summary(false, 60)
                             );
@@ -92,7 +92,7 @@ fn run_daemon(storage: Arc<Storage>) -> Result<()> {
                     }
                     Ok(None) => {}
                     Err(err) => {
-                        eprintln!("[clipvault-daemon] Erro ao salvar item no SQLite: {err:#}");
+                        eprintln!("[clipvault-daemon] Failed to save entry to SQLite: {err:#}");
                     }
                 }
             }
@@ -104,12 +104,12 @@ fn run_daemon(storage: Arc<Storage>) -> Result<()> {
             let now_ts = Utc::now().timestamp();
             match storage.purge_expired(now_ts) {
                 Ok(purged) if purged > 0 => {
-                    println!("[clipvault-daemon] GC removeu {purged} segredo(s) expirado(s).");
+                    println!("[clipvault-daemon] GC purged {purged} expired secret(s).");
                     let _ = std::io::stdout().flush();
                 }
                 Ok(_) => {}
                 Err(err) => {
-                    eprintln!("[clipvault-daemon] Erro no GC de segredos expirados: {err:#}");
+                    eprintln!("[clipvault-daemon] Error during expired secrets GC: {err:#}");
                 }
             }
             last_gc = Instant::now();
@@ -119,7 +119,7 @@ fn run_daemon(storage: Arc<Storage>) -> Result<()> {
     stop_flag.store(true, Ordering::Relaxed);
     match handle.join() {
         Ok(res) => res,
-        Err(_) => anyhow::bail!("thread do watcher encerrou de forma inesperada"),
+        Err(_) => anyhow::bail!("watcher thread terminated unexpectedly"),
     }
 }
 

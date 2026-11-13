@@ -1,63 +1,63 @@
 # ClipVault
 
-Gerenciador e **Time-Machine inteligente de clipboard** escrito em Rust, com classificação semântica automática, captura e preview gráfico de imagens no terminal, mascaramento e auto-expiração de segredos, persistência local embutida e busca *fuzzy*.
+Smart **clipboard manager and Time-Machine** written in Rust, featuring automatic semantic classification, terminal image capture and graphical preview, secret masking with auto-expiration, embedded local persistence, and real-time fuzzy search.
 
-## Compatibilidade
+## Compatibility
 
-O `clipvault` funciona em **qualquer distribuição Linux (Wayland e X11)** — incluindo Pop!_OS, Ubuntu, Debian, Fedora, Arch Linux e derivados — além de compilar nativamente em **macOS e Windows**, utilizando `arboard` e SQLite embutido via `rusqlite` (`bundled`, sem dependências externas em tempo de execução).
+`clipvault` works on **any Linux distribution (Wayland and X11)** — including Pop!_OS, Ubuntu, Debian, Fedora, Arch Linux, and derivatives — and also compiles natively on **macOS and Windows**, using `arboard` and embedded SQLite via `rusqlite` (`bundled`, with no runtime database dependencies).
 
-- **Linux (Wayland)**: suporte nativo à persistência do clipboard após fechar a TUI e captura de texto/imagens PNG (recomendado instalar `wl-clipboard`, que fornece `wl-paste` e `wl-copy`).
-- **Linux (X11)**: suporte via `arboard` e fallback automático para `xclip` ou `xsel`.
-- **macOS e Windows**: compilação direta via `cargo build --release` com captura/restauração via `arboard`.
-
----
-
-## Funcionalidades Principais
-
-- **Monitoramento em Segundo Plano (`daemon`)**: observa alterações na área de transferência (~250ms), suporta texto e imagens PNG e ignora ecos gerados pelo próprio `clipvault` ao restaurar itens antigos.
-- **Classificação Heurística Automática**: categoriza cada item copiado em:
-  - `[JSON]` — gera automaticamente uma versão indentada (`pretty_json`) para visualização no preview.
-  - `[URL]` — links `http`/`https`/`ftp`/`ws`/`wss`/`ssh`.
-  - `[CODE]` — trechos de código-fonte (Rust, JS/TS, Python, C/C++, etc.).
-  - `[CMD]` — comandos de terminal, *pipes* e scripts shell (`#!/bin/bash`, `cargo`, `git`, `docker`, etc.).
-  - `[SECRET]` — tokens, chaves de API (`sk-...`, `ghp_...`, `AKIA...`, `AIza...`), `Bearer` tokens, JWTs, chaves privadas PEM/OpenSSH e atribuições explícitas de senha.
-  - `[IMG]` — capturas de tela e imagens PNG copiadas (com preview gráfico no terminal via Sixel/Kitty/Halfblocks, restauração via `Enter` e abertura externa em resolução original 1:1 com `v`).
-  - `[TEXT]` — texto simples (fallback).
-- **Segurança por Padrão (`SecretToken`)**:
-  - Preview mascarado automaticamente na lista e no painel de detalhes (revelado apenas sob demanda com `s`).
-  - **TTL automático de 5 minutos (300 segundos)** com limpeza automática.
-- **Persistência Rápida & Deduplicação**:
-  - Banco SQLite embutido em modo **WAL** (`journal_mode = WAL`, `busy_timeout = 5000`), permitindo acesso concorrente seguro entre o `daemon` e a `ui`.
-  - Deduplicação por hash **SHA-256**: copiar o mesmo conteúdo novamente atualiza o timestamp, incrementa o contador de uso e preserva a fixação (`pinned`).
-- **Interface TUI Interativa (`ratatui` + `crossterm`)**:
-  - Busca *fuzzy* em tempo real (`fuzzy-matcher`), painel dividido entre histórico e preview formatado/visual.
+- **Linux (Wayland)**: native support for persisting clipboard entries after exiting the TUI and capturing text/PNG images (`wl-clipboard` providing `wl-paste` and `wl-copy` is recommended).
+- **Linux (X11)**: supported via `arboard` with automatic fallback to `xclip` or `xsel`.
+- **macOS & Windows**: compiles directly with `cargo build --release` using `arboard` for clipboard capture and restoration.
 
 ---
 
-## Instalação e Daemon Automático (`systemd`)
+## Key Features
 
-### 1. Pré-requisitos
+- **Background Watcher (`daemon`)**: monitors system clipboard changes (~250ms polling), supports text and PNG images, and ignores self-generated echo events when restoring older entries.
+- **Automatic Heuristic Classification**: categorizes each copied item into:
+  - `[JSON]` — automatically generates an indented `pretty_json` view in the preview pane.
+  - `[URL]` — `http`/`https`/`ftp`/`ws`/`wss`/`ssh` links.
+  - `[CODE]` — source code snippets (Rust, JS/TS, Python, C/C++, etc.).
+  - `[CMD]` — terminal commands, pipes, and shell scripts (`#!/bin/bash`, `cargo`, `git`, `docker`, etc.).
+  - `[SECRET]` — tokens, API keys (`sk-...`, `ghp_...`, `AKIA...`, `AIza...`), `Bearer` tokens, JWTs, PEM/OpenSSH private keys, and explicit password assignments.
+  - `[IMG]` — copied screenshots and PNG images (with terminal graphical preview via Sixel/Kitty/Halfblocks, restoration with `Enter`, and 1:1 external viewer opening with `v`).
+  - `[TEXT]` — plain text (fallback).
+- **Security by Default (`SecretToken`)**:
+  - Automatically masked in both the list and preview panes (revealed on demand with `s`).
+  - **Automatic 5-minute TTL (300 seconds)** purged by the background garbage collector and on database reads.
+- **Fast Persistence & Deduplication**:
+  - Embedded SQLite database configured with **WAL mode** (`journal_mode = WAL`, `busy_timeout = 5000`) for safe concurrent access between `daemon` and `ui`.
+  - **SHA-256 deduplication**: copying identical content updates its timestamp, increments `use_count`, and preserves `pinned` status.
+- **Interactive Terminal UI (`ratatui` + `crossterm`)**:
+  - Real-time fuzzy search (`fuzzy-matcher`) with a split history list and formatted/graphical preview pane.
 
-- Toolchain Rust (`cargo` e `rustc`) instalada via [rustup](https://rustup.rs/).
-- No Linux, ferramentas recomendadas de integração de clipboard para o ambiente gráfico em uso:
+---
+
+## Installation & Automatic Daemon (`systemd`)
+
+### 1. Prerequisites
+
+- Rust toolchain (`cargo` and `rustc`) installed via [rustup](https://rustup.rs/).
+- On Linux, recommended clipboard utilities for your display server:
   - **Wayland**: `wl-clipboard` (`sudo apt install wl-clipboard` / `sudo dnf install wl-clipboard` / `sudo pacman -S wl-clipboard`)
-  - **X11**: `xclip` ou `xsel` e bibliotecas XCB padrão (caso necessário em instalações mínimas Debian/Ubuntu: `sudo apt install xclip libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`)
+  - **X11**: `xclip` or `xsel` plus standard XCB headers (on minimal Debian/Ubuntu installs: `sudo apt install xclip libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev`)
 
-### 2. Clonar, Compilar e Instalar em `~/.local/bin`
+### 2. Clone, Build, and Install to `~/.local/bin`
 
 ```bash
-git clone [https://github.com/Jvamg/clipvault.git](https://github.com/Jvamg/clipvault.git)
+git clone https://github.com/Jvamg/clipvault.git
 cd clipvault
 cargo build --release
 mkdir -p ~/.local/bin
 cp target/release/clipvault ~/.local/bin/clipvault
 ```
 
-> Certifique-se de que `~/.local/bin` esteja no seu `$PATH` (ou utilize o caminho completo `~/.local/bin/clipvault`).
+> Make sure `~/.local/bin` is included in your `$PATH` (or reference `~/.local/bin/clipvault` directly).
 
-### 3. Configurar o Daemon Automático (`systemd --user`)
+### 3. Enable the Automatic User Service (`systemd --user`)
 
-Crie o arquivo de serviço `~/.config/systemd/user/clipvault.service` para que o monitoramento em segundo plano inicie automaticamente ao fazer login:
+Create `~/.config/systemd/user/clipvault.service` so the background watcher starts automatically on login:
 
 ```bash
 mkdir -p ~/.config/systemd/user
@@ -76,7 +76,7 @@ WantedBy=default.target
 EOF
 ```
 
-Ative e inicie o serviço imediatamente:
+Reload `systemd`, enable, and start the service:
 
 ```bash
 systemctl --user daemon-reload
@@ -84,7 +84,7 @@ systemctl --user enable --now clipvault.service
 systemctl --user status clipvault.service
 ```
 
-Para acompanhar os logs do daemon em tempo real:
+To follow live daemon logs:
 
 ```bash
 journalctl --user -u clipvault.service -f
@@ -92,15 +92,15 @@ journalctl --user -u clipvault.service -f
 
 ---
 
-## Configurando o Atalho Global (`Super + V` / `Win + V`)
+## Global Shortcut Setup (`Super + V` / `Win + V`)
 
-Para abrir o **ClipVault** rapidamente de qualquer lugar pressionando `Super + V` (tecla Windows/Super + `V`), cadastre um atalho personalizado nas configurações do seu ambiente de desktop apontando para o seu emulador de terminal preferido:
+To summon **ClipVault** from anywhere using `Super + V` (`Win + V`), add a custom keyboard shortcut in your desktop environment pointing to your preferred terminal emulator:
 
-1. Abra as **Configurações do Sistema** → **Teclado** → **Atalhos Personalizados** (ou seção equivalente do seu gerenciador de janelas).
-2. Adicione um novo atalho:
-   - **Nome**: `ClipVault`
-   - **Combinação de teclas**: `Super + V`
-   - **Comando** (escolha o correspondente ao seu terminal):
+1. Open **System Settings** → **Keyboard** → **Custom Shortcuts** (or the equivalent section in your desktop/window manager).
+2. Create a new shortcut:
+   - **Name**: `ClipVault`
+   - **Key combination**: `Super + V`
+   - **Command** (choose the command matching your terminal):
 
 - **Pop!_OS / COSMIC Terminal**:
   ```bash
@@ -119,64 +119,64 @@ Para abrir o **ClipVault** rapidamente de qualquer lugar pressionando `Super + V
   alacritty -e ~/.local/bin/clipvault
   ```
 
-> **Dica:** Em ambientes com Wayland/COSMIC, você também pode usar `sh -c '~/.local/bin/clipvault'` caso seu gerenciador de janelas não expanda `~` automaticamente — nesse caso, substitua `~/.local/bin/clipvault` pelo caminho absoluto (ex.: `/home/seu-usuario/.local/bin/clipvault`).
+> **Tip:** On Wayland/COSMIC, if your desktop launcher does not expand `~`, use the full path (e.g. `/home/your-user/.local/bin/clipvault`) or wrap it with `sh -c '~/.local/bin/clipvault'`.
 
 ---
 
-## Uso Manual (CLI)
+## Manual CLI Usage
 
-### 1. Iniciar o daemon manualmente
+### 1. Start the daemon manually
 
 ```bash
 clipvault daemon
 ```
 
-O banco local padrão é criado automaticamente em `~/.local/share/clipvault/clipvault.db`. Você pode informar outro caminho com `--db`:
+By default, the local database is stored at `~/.local/share/clipvault/clipvault.db`. Pass `--db` to override it:
 
 ```bash
-clipvault --db /tmp/meu-historico.db daemon
+clipvault --db /tmp/my-history.db daemon
 ```
 
-### 2. Abrir a interface interativa (`ui`)
+### 2. Open the interactive TUI (`ui`)
 
 ```bash
 clipvault
-# ou explicitamente:
+# or explicitly:
 clipvault ui
 ```
 
 ---
 
-## Atalhos da TUI
+## TUI Keybindings
 
-| Atalho | Ação |
+| Key | Action |
 | --- | --- |
-| `Enter` | Copia o item selecionado (texto ou imagem `[IMG]`) de volta para o clipboard e sai da TUI |
-| `v` (ou `Ctrl+V`) | Salva a imagem selecionada (`[IMG]`) em `/tmp/clipvault-preview.png` e abre no visualizador padrão (`xdg-open`) |
-| `↑` / `↓` ou `j` / `k` | Navega pelo histórico (oculta segredos novamente ao trocar de item) |
-| `/` ou `Tab` | Alterna o foco para digitar na barra de busca *fuzzy* em tempo real |
-| `p` (ou `Ctrl+P`) | Fixa ou desafixa o item selecionado no topo da lista |
-| `d` (ou `Ctrl+D` / `Delete`) | Deleta o item selecionado do histórico |
-| `s` (ou `Ctrl+S`) | Revela ou oculta o conteúdo de um `SecretToken` no painel de preview |
-| `Backspace` | Remove o último caractere do filtro de busca |
-| `Esc` | Limpa a busca ativa ou encerra a TUI |
+| `Enter` | Copies the selected item (text or `[IMG]`) back to the clipboard and quits the TUI |
+| `v` (or `Ctrl+V`) | Saves the selected `[IMG]` to `/tmp/clipvault-preview.png` and opens it in the default system viewer (`xdg-open`) |
+| `↑` / `↓` or `j` / `k` | Navigates through history (re-masks secrets automatically when changing selection) |
+| `/` or `Tab` | Toggles focus on the real-time fuzzy search bar |
+| `p` (or `Ctrl+P`) | Pins or unpins the selected entry at the top of the list |
+| `d` (or `Ctrl+D` / `Delete`) | Deletes the selected entry from history |
+| `s` (or `Ctrl+S`) | Reveals or hides a `SecretToken` in the preview pane |
+| `Backspace` | Removes the last character from the search query |
+| `Esc` | Clears the active search filter or exits the TUI |
 
 ---
 
-## Arquitetura (`src/`)
+## Architecture (`src/`)
 
-- `src/domain.rs` — Modelos centrais (`ClipEntry`, `ContentKind`), cálculo de SHA-256, formatação de preview seguro e tempo relativo.
-- `src/classifier.rs` — Motor heurístico baseado em `regex` e `serde_json` com priorização de segurança para `SecretToken`.
-- `src/storage.rs` — Persistência local embutida com `rusqlite` (SQLite em modo WAL), CRUD, deduplicação por hash, armazenamento de blobs PNG, controle de `last_restored_hash`, limpeza de expirados e busca *fuzzy*.
-- `src/watcher.rs` — Thread de monitoramento do clipboard via `arboard` + suporte Wayland/X11 (`wl-paste`/`wl-copy`, `xclip`/`xsel`) com canal `std::sync::mpsc`, filtro anti-eco e GC periódico.
-- `src/tui.rs` — Interface interativa de terminal com `ratatui`, `crossterm` e `ratatui-image` (Sixel/Kitty/Halfblocks).
-- `src/main.rs` — CLI via `clap` com suporte aos subcomandos `daemon` e `ui` (padrão).
+- `src/domain.rs` — Core models (`ClipEntry`, `ContentKind`), SHA-256 hashing, safe preview masking, and relative time formatting.
+- `src/classifier.rs` — Heuristic classifier powered by `regex` and `serde_json` prioritizing security for `SecretToken` entries.
+- `src/storage.rs` — Embedded SQLite persistence with `rusqlite` (WAL mode), CRUD, hash deduplication, PNG blob storage, `last_restored_hash` tracking, expiration purging, and fuzzy search.
+- `src/watcher.rs` — Background clipboard monitor via `arboard` + Wayland/X11 CLI support (`wl-paste`/`wl-copy`, `xclip`/`xsel`) over an `std::sync::mpsc` channel with anti-echo filtering and periodic GC.
+- `src/tui.rs` — Interactive terminal interface built with `ratatui`, `crossterm`, and `ratatui-image` (Sixel/Kitty/Halfblocks).
+- `src/main.rs` — `clap` CLI supporting `daemon` and `ui` (default) subcommands.
 
 ---
 
-## Testes
+## Running Tests
 
-Execute toda a suíte de testes unitários com:
+Run the full unit test suite with:
 
 ```bash
 cargo test
