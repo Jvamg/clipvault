@@ -376,7 +376,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "clipvault"
+name = "clipvault-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",

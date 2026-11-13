@@ -1,5 +1,5 @@
 [package]
-name = "clipvault"
+name = "clipvault-tui"
 version = "0.1.0"
 edition = "2021"
 authors = ["João Vitor Araujo Moraes Guzzo"]
@@ -30,3 +30,7 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = "3.10"
+
+[[bin]]
+name = "clipvault"
+path = "src/main.rs"
