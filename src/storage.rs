@@ -80,6 +80,7 @@ impl Storage {
         .context("falha ao inicializar PRAGMAs e schema SQLite")?;
 
         ensure_image_columns(&conn)?;
+        Self::purge_legacy_binary_entries(&conn)?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -94,10 +95,29 @@ impl Storage {
             .join("clipvault.db")
     }
 
+    /// Remove registros legados não-imagem cujo texto contém bytes NUL ou assinatura binária PNG.
+    fn purge_legacy_binary_entries(conn: &Connection) -> Result<()> {
+        conn.execute(
+            "DELETE FROM entries
+             WHERE kind != 'Image'
+               AND (
+                   instr(CAST(content AS BLOB), X'00') > 0
+                   OR instr(CAST(content AS BLOB), X'89504E47') > 0
+                   OR instr(content, char(65533) || 'PNG') > 0
+               )",
+            [],
+        )
+        .context("falha ao limpar registros binários legados")?;
+        Ok(())
+    }
+
     /// Insere um novo item ou deduplica pelo SHA-256 se já existir.
     /// Também remove automaticamente itens expirados antes da gravação.
     pub fn insert_or_update(&self, content: &str, now_ts: i64) -> Result<Option<ClipEntry>> {
-        if content.trim().is_empty() {
+        if content.trim().is_empty()
+            || content.contains('\0')
+            || content.starts_with("\u{FFFD}PNG")
+        {
             return Ok(None);
         }
 
@@ -822,6 +842,33 @@ mod tests {
                 ",
             )
             .expect("seed legacy table");
+
+            conn.execute(
+                "INSERT INTO entries (
+                    content, pretty_json, kind, created_at, updated_at,
+                    content_hash, use_count, pinned, expires_at
+                ) VALUES (?1, NULL, 'PlainText', 101, 101, 'badnulhash', 1, 0, NULL)",
+                params!["png\0corrupt_payload"],
+            )
+            .expect("seed nul legacy entry");
+
+            conn.execute(
+                "INSERT INTO entries (
+                    content, pretty_json, kind, created_at, updated_at,
+                    content_hash, use_count, pinned, expires_at
+                ) VALUES (?1, NULL, 'PlainText', 102, 102, 'badpnghash', 1, 0, NULL)",
+                params!["\u{FFFD}PNG\r\n\u{001a}\n"],
+            )
+            .expect("seed lossy png legacy entry");
+
+            conn.execute(
+                "INSERT INTO entries (
+                    content, pretty_json, kind, created_at, updated_at,
+                    content_hash, use_count, pinned, expires_at
+                ) VALUES (CAST(X'89504E470D0A1A0A' AS TEXT), NULL, 'PlainText', 103, 103, 'badrawpnghash', 1, 0, NULL)",
+                [],
+            )
+            .expect("seed raw binary png legacy entry");
         }
 
         let storage = Storage::open(&db_path).expect("migrate legacy db");
@@ -830,6 +877,15 @@ mod tests {
         assert_eq!(existing[0].content, "historico antigo preservado");
         assert!(existing[0].image_blob.is_none());
         assert!(existing[0].image_dimensions.is_none());
+
+        assert!(storage
+            .insert_or_update("texto\0binario", 210)
+            .expect("reject nul text")
+            .is_none());
+        assert!(storage
+            .insert_or_update("\u{FFFD}PNG\r\n\u{001a}\n", 220)
+            .expect("reject lossy png text")
+            .is_none());
 
         let img = storage
             .insert_or_update_image(vec![1, 2, 3, 4], 64, 64, 250)

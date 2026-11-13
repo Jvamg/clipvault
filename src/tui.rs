@@ -30,21 +30,15 @@ pub fn should_use_kitty_protocol(
     guessed: ProtocolType,
     term_program: Option<&str>,
     term: Option<&str>,
-    desktop: Option<&str>,
 ) -> bool {
     if guessed != ProtocolType::Halfblocks {
         return false;
     }
-    let matches_modern_term = |val: &str| {
+    let matches_kitty_term = |val: &str| {
         let lower = val.to_ascii_lowercase();
-        lower.contains("cosmic")
-            || lower.contains("kitty")
-            || lower.contains("ghostty")
-            || lower.contains("wezterm")
+        lower.contains("kitty") || lower.contains("ghostty") || lower.contains("wezterm")
     };
-    term_program.is_some_and(matches_modern_term)
-        || term.is_some_and(matches_modern_term)
-        || desktop.is_some_and(|d| d.to_ascii_lowercase().contains("cosmic"))
+    term_program.is_some_and(matches_kitty_term) || term.is_some_and(matches_kitty_term)
 }
 
 /// Estado completo da interface interativa de terminal.
@@ -85,16 +79,8 @@ impl App {
         let guessed = picker.guess_protocol();
         let term_program = std::env::var("TERM_PROGRAM").ok();
         let term = std::env::var("TERM").ok();
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP")
-            .ok()
-            .or_else(|| std::env::var("COSMIC_VERSION").ok().map(|_| "cosmic".to_string()));
 
-        if should_use_kitty_protocol(
-            guessed,
-            term_program.as_deref(),
-            term.as_deref(),
-            desktop.as_deref(),
-        ) {
+        if should_use_kitty_protocol(guessed, term_program.as_deref(), term.as_deref()) {
             picker.protocol_type = ProtocolType::Kitty;
         }
 
@@ -740,42 +726,36 @@ mod tests {
     }
 
     #[test]
-    fn kitty_protocol_fallback_detects_cosmic_and_modern_terminals() {
-        assert!(should_use_kitty_protocol(
+    fn kitty_protocol_fallback_detects_modern_terminals() {
+        assert!(!should_use_kitty_protocol(
             ProtocolType::Halfblocks,
             Some("cosmic-term"),
             Some("xterm-256color"),
-            None,
         ));
         assert!(should_use_kitty_protocol(
             ProtocolType::Halfblocks,
             None,
             Some("xterm-kitty"),
-            None,
         ));
         assert!(should_use_kitty_protocol(
             ProtocolType::Halfblocks,
             Some("ghostty"),
             None,
-            None,
         ));
         assert!(should_use_kitty_protocol(
             ProtocolType::Halfblocks,
-            None,
+            Some("WezTerm"),
             Some("xterm-256color"),
-            Some("COSMIC"),
         ));
         assert!(!should_use_kitty_protocol(
             ProtocolType::Halfblocks,
             Some("gnome-terminal"),
             Some("xterm-256color"),
-            Some("GNOME"),
         ));
         assert!(!should_use_kitty_protocol(
             ProtocolType::Sixel,
-            Some("cosmic-term"),
+            Some("kitty"),
             None,
-            Some("COSMIC"),
         ));
     }
 }
