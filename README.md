@@ -181,3 +181,24 @@ Run the full unit test suite with:
 ```bash
 cargo test
 ```
+
+---
+
+### Quick Install via Cargo (`crates.io`)
+
+    cargo install clipvault-tui
+
+*(The binary is installed at `~/.cargo/bin/clipvault` — remember to point `ExecStart=` in your `systemd` unit to `
+---
+
+### Quick Install via Cargo (`crates.io`)
+
+    cargo install clipvault-tui
+
+*(The binary is installed at `~/.cargo/bin/clipvault` — remember to point `ExecStart=` in your `systemd` unit to `%h/.cargo/bin/clipvault daemon` if you install via Cargo.)*
+
+### Troubleshooting (Wayland Boot Race Condition)
+
+If `clipvault` stops capturing items right after a system reboot, the user service likely started before the Wayland compositor exported `WAYLAND_DISPLAY`. Ensure your unit file includes `After=graphical-session.target`, `PartOf=graphical-session.target`, and `ExecStartPre=/bin/sleep 3`, or re-import the session environment manually:
+
+    systemctl --user import-environment WAYLAND_DISPLAY XDG_RUNTIME_DIR && systemctl --user restart clipvault.service
